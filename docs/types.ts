@@ -28,7 +28,7 @@ export type Node =
   | BaseNode<"parse_pdf", { pdf_path: string; chunk_size: number; overlap: number }>
   | BaseNode<"embed_pdf", { chunks_in: string; model: "text-embedding-3-small" }>
   | BaseNode<"build_vectorstore", { embeddings_in: string; collection: string }>
-  | BaseNode<"merge_xlsx", { xlsx_path: string; flatten: boolean; split: "by_department" }>
+  | BaseNode<"merge_xlsx", { xlsx_path?: string; xlsx_paths?: string[]; flatten: boolean; split: "by_department";}>
   | BaseNode<"validate_with_pdf", { table_in: string; vs_in: string; policies: Array<"exists" | "sum_check">; tolerance: number }>
   | BaseNode<"export_xlsx", { table_in: string; filename: string }>;
 

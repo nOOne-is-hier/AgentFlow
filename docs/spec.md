@@ -22,11 +22,13 @@
 
 로그인 → 작업 UI → **우측 채팅**에서 파일 업로드·지시·HITL → 중앙 그래프 실시간 생성/조작(DnD/Save/Load) → 실행 → 검증 리포트(우측 채팅 렌더) → 좌측 사이드 패널에서 **XLSX 다운로드**.
 
+* 입력 데이터: **PDF 1개 + 다수 XLSX(부서별)** 를 채팅에 첨부하거나, 첨부가 없을 경우 `storage/splits/<최신 폴더>`의 **모든 `.xlsx`** 를 자동 수집하여 병합.
+
 ## 2.2 데모 수용 기준
 
 * 채팅 한 문장 지시로 그래프가 생성되고 ToT/ReAct가 단계별 스트림으로 표시.
-* `exists`/`sum_check(±0.5%)` 결과가 우측 채팅에 근거 스니펫과 함께 제시.
-* XLSX 산출물 다운로드 가능.
+* `exists`/`sum_check(±0.5%)` 결과가 우측 채팅에 **근거 스니펫**과 함께 제시.
+* XLSX 산출물 **다운로드 가능**(지정 파일명 표시).
 
 ---
 
@@ -67,19 +69,23 @@
 
 ## 5.2 작업 UI 레이아웃
 
+* **데이터 입력 용어**: “PDF + 부서별 XLSX 묶음(병합 실행)”을 기본으로 사용.
+
 * **좌측 사이드 패널**
 
   * 사용자 정보(이메일, 사번 끝 4자리 마스킹)
   * 섹션: **워크플로우 목록**, **파일 목록**
   * 각 항목 선택/다운로드 버튼(파일)
+
 * **중앙 그래프 캔버스**
 
   * 노드/엣지 시각화(DnD/줌)
   * 읽기 전용 속성 패널(선택 시)
   * **Save/Load** 가능(파일/스토리지 기반)
+
 * **우측 채팅 패널**(**유일한 채팅 UI**)
 
-  * 파일 업로드(PDF, XLSX)
+  * 파일 업로드(PDF, XLSX 다수)
   * 사용자 지시 입력
   * **HITL** 확인(예/아니오)
   * **ToT/ReAct** 이벤트 스트림(PLAN/ACTION/OBS/SUMMARY)
@@ -174,7 +180,7 @@
 | `parse_pdf`         | `{ "pdf_path": "string", "chunk_size": 1200, "overlap": 200 }`                                            | `pdf_chunks`        |
 | `embed_pdf`         | `{ "chunks_in": "node.out", "model": "text-embedding-3-small" }`                                          | `pdf_embeddings`    |
 | `build_vectorstore` | `{ "embeddings_in": "node.out", "collection": "budget_pdf" }`                                             | `vs_ref`            |
-| `merge_xlsx`        | `{ "xlsx_path": "string", "flatten": true, "split": "by_department" }`                                    | `merged_table`      |
+| `merge_xlsx`        | `{ "xlsx_path"?: "string", "xlsx_paths"?: string[], "flatten": true, "split": "by_department" }`          | `merged_table`      |
 | `validate_with_pdf` | `{ "table_in": "node.out", "vs_in": "node.out", "policies": ["exists","sum_check"], "tolerance": 0.005 }` | `validation_report` |
 | `export_xlsx`       | `{ "table_in": "node.out", "filename": "string" }`                                                        | `artifact_path`     |
 
@@ -194,8 +200,7 @@
 
 * `POST /workflows`에 전체 `Workflow` JSON 저장, `GET /workflows/{id}`로 복원.
 * `nodes[].type` → **LangGraph 노드 함수** 매핑.
-* `edges[{from,to}]` → **LangGraph edge**로 연결.
-  데이터 전달은 기존대로 `config.*_in`과 `in/out` 키를 파이프 해석기가 해석.
+* `edges[{from,to}]` → **LangGraph edge**로 연결. 데이터 전달은 기존대로 `config.*_in`과 `in/out` 키를 파이프 해석기가 해석.
 
 ---
 
@@ -221,9 +226,11 @@
      * 마지막 행에 **부서 합계**(예산액/기정액/비교증감)
 * 부서명 정규화: 공백/전각/괄호 표기 등 단순 정리(정규화 맵은 코드 내부 간단 rules).
 
+> *(참고: 현재 엔진 산출물 시트는 `merged / summary / items` 3장으로 제공되며, 본 분할 규칙은 차기 단계 구현 범위로 유지.)*
+
 ## 9.3 PDF 파싱/임베딩 단위
 
-* 파싱: 페이지 텍스트 추출 → **chunk_size 1200 tokens**, overlap 200(문단 경계 유지 노력)
+* 파싱: 페이지 텍스트 추출 → **chunk_size 1200 tokens**, overlap 200(문단 경계 유지)
 * 메타: `page`, `offset`, `section_hint?`(제목 라인 heuristic)
 * 임베딩: `text-embedding-3-small`(1536차원) with OpenAI
 * Vector store: **Chroma** collection=`budget_pdf`, `id=page:offset`
@@ -305,14 +312,18 @@
 ## 11.3 채팅 턴 (그래프 패치 + ToT 요약)
 
 * `POST /chat/turn`
-  **Req** `{ "message": "string", "fileIds": ["uuid"] }`
+  **Req** `{ "message": "string", "fileIds": ["uuid", "..."] }`
   **Res** `200 { "assistant": "string", "tot": { /*요약*/ }, "graphPatch": { /*8.3*/ } }`
+
+**설명**: `fileIds`로 **PDF 1개와 다수의 XLSX**를 함께 넘길 수 있음. XLSX가 첨부되지 않은 경우, 서버는 `storage/splits/<최신 폴더>`에서 **모든 `.xlsx`** 를 자동 수집해 병합한다.
 
 ## 11.4 워크플로우 저장/불러오기
 
 * `GET /workflows`
 * `POST /workflows` (body: `Workflow`) → `201 { "id": "uuid" }`
 * `GET /workflows/{id}` → `200 Workflow`
+
+**quickstart**: 최신 **PDF 1개 + `storage/splits/<최신>` 폴더의 모든 XLSX**로 기본 워크플로우를 생성한다.
 
 ## 11.5 실행/상태
 
@@ -326,7 +337,7 @@
 * **신규** `POST /runs/{runId}/continue`
   **Req** `{ "approve": true | false, "comment"?: "string" }`
   **Res** `200 { "status": "RUNNING" | "CANCELLED" }`
-  **설명**: LangGraph `interrupt("approve")` 대기 상태를 승인/거부로 해제. 거부(false) 시 런 종료(`CANCELLED` 또는 `FAILED`).
+  **설명**: LangGraph `interrupt("approve")` 대기 상태를 승인/거부로 해제. 거부(false) 시 런 종료.
 
 ## 11.6 이벤트 스트림(SSE)
 
@@ -336,6 +347,7 @@
 ## 11.7 산출물
 
 * `GET /artifacts/{artifactId}` → 파일 다운로드(`application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`)
+  **다운로드 파일명은 `export_xlsx.filename` 값을 사용**하며, 본 시나리오 기본값은 **`2025년도 제3회 일반 및 기타특별회계 추가경정예산서(세출-검색용).xlsx`** 이다.
 
 ## 11.8 에러 응답 표준
 
@@ -349,9 +361,9 @@
 
 ```
 IDLE
- └─(execute)→ PLANNING                // 그래프 스냅샷 확정
+ └─(execute)→ PLANNING
  PLANNING
- └─(HITL 필요 시)→ WAITING_HITL       // LangGraph interrupt("approve")
+ └─(HITL 필요 시)→ WAITING_HITL
  WAITING_HITL
  └─(continue approve=true)→ RUNNING
  └─(continue approve=false)→ FAILED|CANCELLED
@@ -459,8 +471,8 @@ IDLE
 
 ```json
 {
-  "message": "두 파일을 합쳐서 부서별 집계 후 PDF 기준으로 상이/누락 검토해줘.",
-  "fileIds": ["pdf-uuid","xlsx-uuid"]
+  "message": "부서별 XLSX들을 모두 합쳐서 문서 기준으로 검증하고 내보내줘.",
+  "fileIds": ["pdf-uuid","xlsx-uuid-1","xlsx-uuid-2","xlsx-uuid-3"]
 }
 ```
 
@@ -472,12 +484,30 @@ IDLE
   "tot": { "steps": ["쿼리 이해", "계획 수립", "그래프 작성"] },
   "graphPatch": {
     "addNodes": [
-      {"id":"parse_pdf","type":"parse_pdf","label":"PDF 파싱","config":{"pdf_path":"/app/storage/예산서.pdf","chunk_size":1200,"overlap":200},"in":[],"out":["pdf_chunks"]},
-      {"id":"embed_pdf","type":"embed_pdf","label":"PDF 임베딩","config":{"chunks_in":"parse_pdf.pdf_chunks","model":"text-embedding-3-small"},"in":["parse_pdf.pdf_chunks"],"out":["pdf_embeddings"]},
-      {"id":"build_vs","type":"build_vectorstore","label":"VectorStore","config":{"embeddings_in":"embed_pdf.pdf_embeddings","collection":"budget_pdf"},"in":["embed_pdf.pdf_embeddings"],"out":["vs_ref"]},
-      {"id":"merge_xlsx","type":"merge_xlsx","label":"XLSX 병합","config":{"xlsx_path":"/app/storage/세출-검색용.xlsx","flatten":true,"split":"by_department"},"in":[],"out":["merged_table"]},
-      {"id":"validate","type":"validate_with_pdf","label":"검증","config":{"table_in":"merge_xlsx.merged_table","vs_in":"build_vs.vs_ref","policies":["exists","sum_check"],"tolerance":0.005},"in":["merge_xlsx.merged_table","build_vs.vs_ref"],"out":["validation_report"]},
-      {"id":"export","type":"export_xlsx","label":"XLSX 내보내기","config":{"table_in":"merge_xlsx.merged_table","filename":"2025년도 제3회 일반 및 기타특별회계 추가경정예산서(세출-검색용).xlsx"},"in":["merge_xlsx.merged_table"],"out":["artifact_path"]}
+      { "id":"parse_pdf","type":"parse_pdf","label":"PDF 파싱",
+        "config":{"pdf_path":"/app/storage/예산서.pdf","chunk_size":1200,"overlap":200},
+        "in":[],"out":["pdf_chunks"] },
+      { "id":"embed_pdf","type":"embed_pdf","label":"PDF 임베딩",
+        "config":{"chunks_in":"parse_pdf.pdf_chunks","model":"text-embedding-3-small"},
+        "in":["parse_pdf.pdf_chunks"],"out":["pdf_embeddings"] },
+      { "id":"build_vs","type":"build_vectorstore","label":"VectorStore",
+        "config":{"embeddings_in":"embed_pdf.pdf_embeddings","collection":"budget_pdf"},
+        "in":["embed_pdf.pdf_embeddings"],"out":["vs_ref"] },
+      { "id":"merge_xlsx","type":"merge_xlsx","label":"XLSX 병합",
+        "config":{"xlsx_paths":[
+          "/app/storage/splits/<latest>/총무과.xlsx",
+          "/app/storage/splits/<latest>/복지정책과.xlsx",
+          "/app/storage/splits/<latest>/환경과.xlsx"
+        ],"flatten":true,"split":"by_department"},
+        "in":[],"out":["merged_table"] },
+      { "id":"validate","type":"validate_with_pdf","label":"검증",
+        "config":{"table_in":"merge_xlsx.merged_table","vs_in":"build_vs.vs_ref",
+                  "policies":["exists","sum_check"],"tolerance":0.005},
+        "in":["merge_xlsx.merged_table","build_vs.vs_ref"],"out":["validation_report"] },
+      { "id":"export","type":"export_xlsx","label":"XLSX 내보내기",
+        "config":{"table_in":"merge_xlsx.merged_table",
+                  "filename":"2025년도 제3회 일반 및 기타특별회계 추가경정예산서(세출-검색용).xlsx"},
+        "in":["merge_xlsx.merged_table"],"out":["artifact_path"] }
     ],
     "addEdges":[
       {"from":"parse_pdf","to":"embed_pdf"},
@@ -516,19 +546,29 @@ data: {"seq":2,"ts":"2025-10-22T09:01:03+09:00","type":"SUMMARY","nodeId":"plan"
 
 ## B.1 전체 Workflow 예시(JSON)
 
-*(원문 내용과 동일, 포맷만 정리됨 — 생략 없이 유지)*
-
 ```json
 {
   "id": "b8f3d0c2-3b1c-4e66-8b6b-1c2c5d4e9a01",
   "name": "구리시_3회추경_검증파이프라인",
   "nodes": [
-    { "id": "parse_pdf", "type": "parse_pdf", "label": "PDF 파싱", "config": { "pdf_path": "/app/storage/예산서.pdf", "chunk_size": 1200, "overlap": 200 }, "in": [], "out": ["pdf_chunks"] },
-    { "id": "embed_pdf", "type": "embed_pdf", "label": "PDF 임베딩", "config": { "chunks_in": "parse_pdf.pdf_chunks", "model": "text-embedding-3-small" }, "in": ["parse_pdf.pdf_chunks"], "out": ["pdf_embeddings"] },
-    { "id": "build_vs", "type": "build_vectorstore", "label": "VectorStore", "config": { "embeddings_in": "embed_pdf.pdf_embeddings", "collection": "budget_pdf" }, "in": ["embed_pdf.pdf_embeddings"], "out": ["vs_ref"] },
-    { "id": "merge_xlsx", "type": "merge_xlsx", "label": "XLSX 병합", "config": { "xlsx_path": "/app/storage/세출-검색용.xlsx", "flatten": true, "split": "by_department" }, "in": [], "out": ["merged_table"] },
-    { "id": "validate", "type": "validate_with_pdf", "label": "검증", "config": { "table_in": "merge_xlsx.merged_table", "vs_in": "build_vs.vs_ref", "policies": ["exists", "sum_check"], "tolerance": 0.005 }, "in": ["merge_xlsx.merged_table", "build_vs.vs_ref"], "out": ["validation_report"] },
-    { "id": "export", "type": "export_xlsx", "label": "XLSX 내보내기", "config": { "table_in": "merge_xlsx.merged_table", "filename": "2025년도 제3회 일반 및 기타특별회계 추가경정예산서(세출-검색용).xlsx" }, "in": ["merge_xlsx.merged_table"], "out": ["artifact_path"] }
+    { "id": "parse_pdf", "type": "parse_pdf", "label": "PDF 파싱",
+      "config": { "pdf_path": "/app/storage/예산서.pdf", "chunk_size": 1200, "overlap": 200 },
+      "in": [], "out": ["pdf_chunks"] },
+    { "id": "embed_pdf", "type": "embed_pdf", "label": "PDF 임베딩",
+      "config": { "chunks_in": "parse_pdf.pdf_chunks", "model": "text-embedding-3-small" },
+      "in": ["parse_pdf.pdf_chunks"], "out": ["pdf_embeddings"] },
+    { "id": "build_vs", "type": "build_vectorstore", "label": "VectorStore",
+      "config": { "embeddings_in": "embed_pdf.pdf_embeddings", "collection": "budget_pdf" },
+      "in": ["embed_pdf.pdf_embeddings"], "out": ["vs_ref"] },
+    { "id": "merge_xlsx", "type": "merge_xlsx", "label": "XLSX 병합",
+      "config": { "xlsx_paths": ["/app/storage/splits/<latest>/..."], "flatten": true, "split": "by_department" },
+      "in": [], "out": ["merged_table"] },
+    { "id": "validate", "type": "validate_with_pdf", "label": "검증",
+      "config": { "table_in": "merge_xlsx.merged_table", "vs_in": "build_vs.vs_ref", "policies": ["exists", "sum_check"], "tolerance": 0.005 },
+      "in": ["merge_xlsx.merged_table", "build_vs.vs_ref"], "out": ["validation_report"] },
+    { "id": "export", "type": "export_xlsx", "label": "XLSX 내보내기",
+      "config": { "table_in": "merge_xlsx.merged_table", "filename": "2025년도 제3회 일반 및 기타특별회계 추가경정예산서(세출-검색용).xlsx" },
+      "in": ["merge_xlsx.merged_table"], "out": ["artifact_path"] }
   ],
   "edges": [
     { "from": "parse_pdf", "to": "embed_pdf" },
@@ -549,7 +589,9 @@ data: {"seq":2,"ts":"2025-10-22T09:01:03+09:00","type":"SUMMARY","nodeId":"plan"
 ```json
 {
   "addNodes": [
-    { "id": "parse_pdf", "type": "parse_pdf", "label": "PDF 파싱", "config": { "pdf_path": "/app/storage/예산서.pdf", "chunk_size": 1200, "overlap": 200 }, "in": [], "out": ["pdf_chunks"] }
+    { "id": "parse_pdf", "type": "parse_pdf", "label": "PDF 파싱",
+      "config": { "pdf_path": "/app/storage/예산서.pdf", "chunk_size": 1200, "overlap": 200 },
+      "in": [], "out": ["pdf_chunks"] }
   ],
   "addEdges": []
 }
