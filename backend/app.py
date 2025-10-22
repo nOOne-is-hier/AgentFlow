@@ -4,37 +4,37 @@ from uuid import uuid4
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional, Tuple
 
-from fastapi import FastAPI, UploadFile, File, HTTPException, Response, Body
+from fastapi import FastAPI, UploadFile, File, HTTPException, Response, Body, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, FileResponse
 from pydantic import BaseModel, Field
 
+from .settings import (
+    APP_VERSION,
+    STORAGE,
+    UPLOADS,
+    WF_DIR,
+    RUN_DIR,
+    ART_DIR,
+    FILES_INDEX,
+)
 from .models import Workflow, GraphPatch
 from .engine import execute_stream, Ctx, now_iso
+from .engine_lg import execute_stream_lg
+from .assistant_reply import generate_assistant_reply
 
-APP_TZ = timezone.utc
-ROOT = os.path.abspath(os.getcwd())
-STORAGE = os.path.join(ROOT, "storage")
-UPLOADS = os.path.join(STORAGE, "uploads")
-WF_DIR = os.path.join(STORAGE, "workflows")
-RUN_DIR = os.path.join(STORAGE, "runs")
-ART_DIR = os.path.join(STORAGE, "artifacts")
-
-os.makedirs(UPLOADS, exist_ok=True)
-os.makedirs(WF_DIR, exist_ok=True)
-os.makedirs(RUN_DIR, exist_ok=True)
-os.makedirs(ART_DIR, exist_ok=True)
-
-TAGS = [
-    {"name": "Auth"},
-    {"name": "Files"},
-    {"name": "Chat"},
-    {"name": "Workflows"},
-    {"name": "Runs"},
-    {"name": "Artifacts"},
-]
-
-app = FastAPI(title="Agentic PoC Backend", version="0.3", openapi_tags=TAGS)
+app = FastAPI(
+    title="Agentic PoC Backend",
+    version=APP_VERSION,
+    openapi_tags=[
+        {"name": "Auth"},
+        {"name": "Files"},
+        {"name": "Chat"},
+        {"name": "Workflows"},
+        {"name": "Runs"},
+        {"name": "Artifacts"},
+    ],
+)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -42,8 +42,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-FILES_INDEX = os.path.join(STORAGE, "files.index.json")
 
 
 def _save_json(path: str, obj: Any):
@@ -58,12 +56,18 @@ def _load_json(path: str, default: Any):
         return json.load(f)
 
 
-# 상단 유틸 근처에 추가
+def _parse_dt(s: str) -> float:
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return 0.0
+
+
+# ---------- 최신 splits/파일 선택 ----------
 def _latest_splits_xlsx_paths() -> List[str]:
     base = os.path.join(STORAGE, "splits")
     if not os.path.isdir(base):
         return []
-    # 최신 디렉터리 찾기
     candidates = [
         os.path.join(base, d)
         for d in os.listdir(base)
@@ -81,36 +85,11 @@ def _latest_splits_xlsx_paths() -> List[str]:
 
 def _select_latest_pdf() -> Optional[Dict[str, Any]]:
     idx = _load_json(FILES_INDEX, {"files": []})
-    files = idx.get("files", [])
-    pdfs = [f for f in files if f.get("type") == "pdf"]
+    pdfs = [f for f in idx.get("files", []) if f.get("type") == "pdf"]
     return max(pdfs, key=lambda x: _parse_dt(x.get("uploadedAt", "")), default=None)
 
 
-def _latest_split_dir() -> Optional[str]:
-    base = os.path.join(STORAGE, "splits")
-    if not os.path.isdir(base):
-        return None
-    # 하위 폴더 중 수정시각 최신 선택
-    candidates = [
-        os.path.join(base, d)
-        for d in os.listdir(base)
-        if os.path.isdir(os.path.join(base, d))
-    ]
-    if not candidates:
-        return None
-    candidates.sort(key=lambda p: os.path.getmtime(p), reverse=True)
-    return candidates[0]
-
-
-def _all_xlsx_in(dirpath: str) -> List[str]:
-    out = []
-    for fn in os.listdir(dirpath):
-        if fn.lower().endswith(".xlsx"):
-            out.append(os.path.join(dirpath, fn))
-    return out
-
-
-# ---------- Schemas with examples ----------
+# ---------- Schemas ----------
 class LoginReq(BaseModel):
     email: str = "keehoon@example.com"
     empno: str = "20251234"
@@ -121,7 +100,7 @@ class LoginRes(BaseModel):
 
 
 class ChatTurnReq(BaseModel):
-    message: str = "업로드한 부서별 xlsx 묶음을 병합하고 pdf를 기준으로 검증해줘"
+    message: str = "부서별 xlsx 병합 후 문서 기반 검증해줘"
     fileIds: List[str] = Field(default_factory=list)
 
 
@@ -157,7 +136,7 @@ async def upload(files: List[UploadFile] = File(...)):
     for f in files:
         ext = os.path.splitext(f.filename)[1].lower()
         if ext not in [".pdf", ".xlsx"]:
-            raise HTTPException(status_code=400, detail=f"unsupported type: {ext}")
+            raise HTTPException(400, f"unsupported type: {ext}")
         fid = str(uuid4())
         outname = f"{fid}{ext}"
         dest = os.path.join(UPLOADS, outname)
@@ -182,30 +161,7 @@ def list_files():
     return _load_json(FILES_INDEX, {"files": []})
 
 
-# ---------- Helpers for chat ----------
-from typing import Tuple
-
-
-def _parse_dt(s: str) -> float:
-    try:
-        return datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
-    except Exception:
-        return 0.0
-
-
-def _select_latest_pdf_xlsx() -> (
-    Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]
-):
-    idx = _load_json(FILES_INDEX, {"files": []})
-    files = idx.get("files", [])
-    pdfs = [f for f in files if f.get("type") == "pdf"]
-    xlss = [f for f in files if f.get("type") == "xlsx"]
-    pdf = max(pdfs, key=lambda x: _parse_dt(x.get("uploadedAt", "")), default=None)
-    xls = max(xlss, key=lambda x: _parse_dt(x.get("uploadedAt", "")), default=None)
-    return pdf, xls
-
-
-# backend/app.py
+# ---------- Chat ----------
 def _build_nodes_and_edges(pdf: Dict[str, Any], xlsx_paths: List[str]):
     nodes = [
         {
@@ -219,21 +175,9 @@ def _build_nodes_and_edges(pdf: Dict[str, Any], xlsx_paths: List[str]):
         {
             "id": "embed_pdf",
             "type": "embed_pdf",
-            "label": "PDF 임베딩",
-            # 엔진은 hash512 로컬해시지만 표기는 임베딩 단계 의미. 혼동 방지 위해 그대로 둡니다.
-            "config": {"chunks_in": "parse_pdf.pdf_chunks", "model": "hash512"},
+            "label": "PDF 임베딩(Chroma)",
+            "config": {"chunks_in": "parse_pdf.pdf_chunks", "reset": True},
             "in": ["parse_pdf.pdf_chunks"],
-            "out": ["pdf_embeddings"],
-        },
-        {
-            "id": "build_vs",
-            "type": "build_vectorstore",
-            "label": "VectorStore",
-            "config": {
-                "embeddings_in": "embed_pdf.pdf_embeddings",
-                "collection": "budget_pdf",
-            },
-            "in": ["embed_pdf.pdf_embeddings"],
             "out": ["vs_ref"],
         },
         {
@@ -251,14 +195,9 @@ def _build_nodes_and_edges(pdf: Dict[str, Any], xlsx_paths: List[str]):
         {
             "id": "validate",
             "type": "validate_with_pdf",
-            "label": "검증",
-            "config": {
-                "table_in": "merge_xlsx.merged_table",
-                "vs_in": "build_vs.vs_ref",
-                "policies": ["exists", "sum_check"],
-                "tolerance": 0.005,
-            },
-            "in": ["merge_xlsx.merged_table", "build_vs.vs_ref"],
+            "label": "검증(exists/sum_check)",
+            "config": {"table_in": "merge_xlsx.merged_table", "tolerance": 0.005},
+            "in": ["merge_xlsx.merged_table"],
             "out": ["validation_report"],
         },
         {
@@ -275,57 +214,35 @@ def _build_nodes_and_edges(pdf: Dict[str, Any], xlsx_paths: List[str]):
     ]
     edges = [
         {"from": "parse_pdf", "to": "embed_pdf"},
-        {"from": "embed_pdf", "to": "build_vs"},
         {"from": "merge_xlsx", "to": "validate"},
-        {"from": "build_vs", "to": "validate"},
         {"from": "validate", "to": "export"},
     ]
     return nodes, edges
 
 
-# ---------- Chat ----------
 @app.post("/chat/turn", response_model=ChatTurnRes, tags=["Chat"])
-def chat_turn(
-    req: ChatTurnReq = Body(
-        examples={
-            "default-auto-splits": {
-                "summary": "PDF(최신 업로드) + splits(최신 폴더) 자동 병합",
-                "value": {"message": "부서별 병합 후 PDF 기준 검증해줘", "fileIds": []},
-            },
-            "explicit-ids": {
-                "summary": "명시적으로 업로드한 PDF/XLSX ID 지정",
-                "value": {
-                    "message": "이 파일들로 검증 파이프라인 생성",
-                    "fileIds": ["<pdf-id>", "<xlsx-id-1>", "<xlsx-id-2>"],
-                },
-            },
-        }
-    )
-):
+def chat_turn(req: ChatTurnReq = Body(...)):
     idx = _load_json(FILES_INDEX, {"files": []})
     idmap = {f["id"]: f for f in idx.get("files", [])}
-
-    # 1) PDF 결정
-    pdf = next(
-        (idmap[i] for i in req.fileIds if i in idmap and idmap[i]["type"] == "pdf"),
-        None,
+    pdf = (
+        next(
+            (idmap[i] for i in req.fileIds if i in idmap and idmap[i]["type"] == "pdf"),
+            None,
+        )
+        or _select_latest_pdf()
     )
-    if not pdf:
-        pdf = _select_latest_pdf()
     if not pdf:
         raise HTTPException(
             400, "PDF가 필요합니다. /files/upload 로 PDF 업로드 후 다시 시도하세요."
         )
 
-    # 2) XLSX 경로 목록 결정: ID로 받은 것 + splits 자동수집
-    xlsx_paths: List[str] = []
-    for i in req.fileIds:
-        m = idmap.get(i)
-        if m and m.get("type") == "xlsx":
-            xlsx_paths.append(m["path"])
+    xlsx_paths = [
+        idmap[i]["path"]
+        for i in req.fileIds
+        if i in idmap and idmap[i]["type"] == "xlsx"
+    ]
     if not xlsx_paths:
         xlsx_paths = _latest_splits_xlsx_paths()
-
     if not xlsx_paths:
         raise HTTPException(
             400,
@@ -335,7 +252,7 @@ def chat_turn(
     nodes, edges = _build_nodes_and_edges(pdf, xlsx_paths)
     patch = {"addNodes": nodes, "addEdges": edges}
     return {
-        "assistant": "PDF + 부서별 XLSX 묶음을 기준으로 검증 그래프를 구성했습니다.",
+        "assistant": "요청을 이해했습니다. 부서별 병합 후 문서 기반 검증을 수행하고 결과 XLSX를 생성합니다.",
         "tot": {"steps": ["쿼리 이해", "계획 수립", "그래프 작성"]},
         "graphPatch": patch,
     }
@@ -364,7 +281,7 @@ def wf_save(wf: Workflow):
 def wf_get(wf_id: str):
     path = os.path.join(WF_DIR, f"{wf_id}.json")
     if not os.path.exists(path):
-        raise HTTPException(status_code=404, detail="workflow not found")
+        raise HTTPException(404, "workflow not found")
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
@@ -374,11 +291,7 @@ def wf_quickstart():
     pdf = _select_latest_pdf()
     xlsx_paths = _latest_splits_xlsx_paths()
     if not (pdf and xlsx_paths):
-        raise HTTPException(
-            400,
-            "최신 PDF 또는 splits XLSX를 찾을 수 없습니다. /files/upload 또는 storage/splits 확인",
-        )
-
+        raise HTTPException(400, "최신 PDF 또는 splits XLSX를 찾을 수 없습니다.")
     nodes, edges = _build_nodes_and_edges(pdf, xlsx_paths)
     wf = {
         "id": f"wf-{uuid4().hex[:8]}",
@@ -388,8 +301,7 @@ def wf_quickstart():
         "createdAt": now_iso(),
         "updatedAt": now_iso(),
     }
-    path = os.path.join(WF_DIR, f"{wf['id']}.json")
-    _save_json(path, wf)
+    _save_json(os.path.join(WF_DIR, f"{wf['id']}.json"), wf)
     return {"id": wf["id"], "nodes": len(nodes), "edges": len(edges)}
 
 
@@ -410,6 +322,7 @@ def execute(req: ExecReq):
         "startedAt": now_iso(),
         "endedAt": None,
         "artifactId": None,
+        "checkpoint": None,
     }
     _save_json(rpath, run)
     return {"runId": run_id}
@@ -435,45 +348,194 @@ def run_continue(run_id: str, body: ContinueReq):
     return {"status": run.get("status")}
 
 
-# ---------- SSE executes real workflow on connect ----------
+# ---------- SSE: 실행 + HITL 대기 + 재개 + 어시스턴트 답장 ----------
 @app.get("/runs/{run_id}/events", tags=["Runs"])
-async def run_events(run_id: str):
+async def run_events(run_id: str, request: Request):
     rpath = os.path.join(RUN_DIR, f"{run_id}.json")
     if not os.path.exists(rpath):
         raise HTTPException(404, "run not found")
     run = _load_json(rpath, {})
     wf = run.get("workflow")
 
+    # LangGraph 기본 사용
+    use_lg = (
+        True
+        if request.query_params.get("engine", "lg").lower() == "lg"
+        or os.environ.get("USE_LANGGRAPH") == "1"
+        else False
+    )
+
     async def gen():
         seq = 1
+        buffer_events: List[Dict[str, Any]] = []  # 어시스턴트 요약용
+        validation: Dict[str, Any] | None = None
+        checkpoint_state: Dict[str, Any] | None = None
 
         def pack(ev: Dict[str, Any]):
             nonlocal seq
             ev.setdefault("seq", seq)
             seq += 1
+            buffer_events.append(ev)
             data = json.dumps(ev, ensure_ascii=False)
             return f"id: {seq}\nevent: message\ndata: {data}\n\n".encode("utf-8")
 
-        # switch to RUNNING now
+        # RUNNING 전이
         run["status"] = "RUNNING"
         _save_json(rpath, run)
 
         ctx = Ctx(run_id=run_id, storage=STORAGE, art_dir=ART_DIR)
-        try:
-            for ev in execute_stream(wf, ctx):
-                yield pack(ev)
-                await asyncio.sleep(0)  # cooperative
 
-            # finalize
+        try:
+            # === 1차 실행 (LG: validate까지 진행 & HITL_SIGNAL 방출) ===
+            stream = execute_stream_lg(wf, ctx) if use_lg else execute_stream(wf, ctx)
+
+            async def stream_iter():
+                for ev in stream:
+                    yield ev
+                    await asyncio.sleep(0)
+
+            async for ev in stream_iter():
+                # HITL 신호 수신 → WAITING_HITL 전이 및 대기
+                if ev.get("nodeId") == "hitl" and ev.get("message") == "HITL_SIGNAL":
+                    run["status"] = "WAITING_HITL"
+                    _save_json(rpath, run)
+                    yield pack(
+                        {
+                            "type": "OBS",
+                            "nodeId": "hitl",
+                            "message": "WAITING_HITL",
+                            "detail": {},
+                        }
+                    )
+
+                    # 승인 대기 루프
+                    while True:
+                        await asyncio.sleep(0.6)
+                        cur = _load_json(rpath, {})
+                        if cur.get("status") in ("RUNNING", "CANCELLED"):
+                            break
+
+                    # 거부 시 종료
+                    if _load_json(rpath, {}).get("status") == "CANCELLED":
+                        yield pack(
+                            {
+                                "type": "SUMMARY",
+                                "nodeId": "hitl",
+                                "message": "사용자 거부로 취소",
+                            }
+                        )
+                        run["status"] = "CANCELLED"
+                        run["endedAt"] = now_iso()
+                        _save_json(rpath, run)
+                        return
+
+                    # 승인됨
+                    yield pack(
+                        {
+                            "type": "OBS",
+                            "nodeId": "hitl",
+                            "message": "APPROVED",
+                            "detail": {},
+                        }
+                    )
+
+                    # === 승인 후 마무리(export 실행) ===
+                    # LG 체크포인트 상태에서 merged_path / export 설정 가져오기
+                    if use_lg and checkpoint_state:
+                        try:
+                            # export 노드 spec 찾기
+                            export_node = next(
+                                n
+                                for n in wf.get("nodes", [])
+                                if n.get("type") == "export_xlsx"
+                            )
+                            cfg = export_node.get("config", {}) or {}
+                            from .engine import node_export_xlsx  # 함수 사용
+
+                            out = node_export_xlsx(
+                                cfg,
+                                {
+                                    "merge_xlsx.merged_table": checkpoint_state.get(
+                                        "merged_path"
+                                    )
+                                },
+                                ctx,
+                            )
+                            yield pack(
+                                {
+                                    "type": "ACTION",
+                                    "nodeId": "export",
+                                    "message": "export_xlsx 시작",
+                                    "detail": {},
+                                }
+                            )
+                            yield pack(
+                                {
+                                    "type": "OBS",
+                                    "nodeId": "export",
+                                    "message": "산출물 경로",
+                                    "detail": {"artifact_id": out.get("artifact_id")},
+                                }
+                            )
+                            yield pack(
+                                {
+                                    "type": "SUMMARY",
+                                    "nodeId": "export",
+                                    "message": "export_xlsx 완료",
+                                    "detail": {"keys": list(out.keys())},
+                                }
+                            )
+                        except StopIteration:
+                            # export 노드가 없으면 패스
+                            pass
+
+                elif ev.get("nodeId") == "validate" and ev.get("type") in (
+                    "OBS",
+                    "SUMMARY",
+                ):
+                    # 검증 요약 저장(어시스턴트 답장용)
+                    # 자세한 report는 LG state에서 넘겨받음
+                    pass
+
+                elif (
+                    ev.get("nodeId") == "hitl"
+                    and ev.get("message") == "STATE_CHECKPOINT"
+                ):
+                    checkpoint_state = ev.get("detail", {}).get("state")
+
+                # 이벤트 송신
+                yield pack(ev)
+
+            # === 완료 처리 ===
             run["status"] = "SUCCEEDED"
-            # artifact id will be inside last event detail; re-scan artifact dir quick
             run["endedAt"] = now_iso()
-            # (best-effort) try to find artifact
+
+            # artifactId best-effort
+            art_id = None
             for fn in os.listdir(ART_DIR):
-                if run_id[:8] in fn and fn.endswith(".xlsx"):
-                    run["artifactId"] = fn.split(".")[0]
+                if fn.endswith(".xlsx") and run_id[:8] in fn:
+                    art_id = fn.split(".")[0]
                     break
+            run["artifactId"] = art_id
             _save_json(rpath, run)
+
+            # 어시스턴트 답장(OpenAI Chat)
+            # 검증 내용은 체크포인트 state에서 전달
+            validation = (
+                (checkpoint_state or {}).get("validation_report", {})
+                if checkpoint_state
+                else {}
+            )
+            reply = generate_assistant_reply(run, buffer_events, validation or {})
+            yield pack(
+                {
+                    "type": "SUMMARY",
+                    "nodeId": "assistant",
+                    "message": "ASSISTANT_REPLY",
+                    "detail": {"text": reply},
+                }
+            )
+
         except Exception as e:
             run["status"] = "FAILED"
             run["endedAt"] = now_iso()
@@ -491,18 +553,16 @@ async def run_events(run_id: str):
 
 
 # ---------- Artifacts ----------
-# /artifacts/{artifact_id}: 메타의 표시 이름으로 다운로드 파일명 설정
 @app.get("/artifacts/{artifact_id}", tags=["Artifacts"])
 def get_artifact(artifact_id: str):
     xlsx_path = os.path.join(ART_DIR, f"{artifact_id}.xlsx")
     if not os.path.exists(xlsx_path):
-        raise HTTPException(status_code=404, detail="artifact not found")
+        raise HTTPException(404, "artifact not found")
     display_name = f"{artifact_id}.xlsx"
     meta_path = os.path.join(ART_DIR, f"{artifact_id}.meta.json")
     if os.path.exists(meta_path):
         try:
-            meta = _load_json(meta_path, {})
-            dn = meta.get("display_name")
+            dn = _load_json(meta_path, {}).get("display_name")
             if isinstance(dn, str) and dn.strip():
                 display_name = dn
         except Exception:

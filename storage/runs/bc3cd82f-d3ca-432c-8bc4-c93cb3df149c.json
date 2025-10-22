@@ -1,0 +1,145 @@
+{
+  "runId": "bc3cd82f-d3ca-432c-8bc4-c93cb3df149c",
+  "status": "SUCCEEDED",
+  "workflow": {
+    "id": "wf-dd63ccae",
+    "name": "Budget-Validation",
+    "nodes": [
+      {
+        "id": "parse_pdf",
+        "type": "parse_pdf",
+        "label": "PDF 파싱",
+        "config": {
+          "pdf_path": "C:\\Users\\lasni\\Desktop\\agent\\storage\\uploads\\456a5abd-e0ca-4eb0-b96e-ac534f7c5840.pdf",
+          "chunk_size": 1200,
+          "overlap": 200
+        },
+        "in": [],
+        "out": [
+          "pdf_chunks"
+        ]
+      },
+      {
+        "id": "embed_pdf",
+        "type": "embed_pdf",
+        "label": "PDF 임베딩(Chroma)",
+        "config": {
+          "chunks_in": "parse_pdf.pdf_chunks",
+          "reset": true
+        },
+        "in": [
+          "parse_pdf.pdf_chunks"
+        ],
+        "out": [
+          "vs_ref"
+        ]
+      },
+      {
+        "id": "merge_xlsx",
+        "type": "merge_xlsx",
+        "label": "XLSX 병합",
+        "config": {
+          "xlsx_paths": [
+            "C:/Users/lasni/Desktop/agent/storage\\splits\\d417a5bf-11cd-4009-8817-01b76bfb14cd\\가족복지과.xlsx",
+            "C:/Users/lasni/Desktop/agent/storage\\splits\\d417a5bf-11cd-4009-8817-01b76bfb14cd\\갈매동.xlsx",
+            "C:/Users/lasni/Desktop/agent/storage\\splits\\d417a5bf-11cd-4009-8817-01b76bfb14cd\\감염병관리과.xlsx",
+            "C:/Users/lasni/Desktop/agent/storage\\splits\\d417a5bf-11cd-4009-8817-01b76bfb14cd\\건강증진과.xlsx",
+            "C:/Users/lasni/Desktop/agent/storage\\splits\\d417a5bf-11cd-4009-8817-01b76bfb14cd\\건축과.xlsx",
+            "C:/Users/lasni/Desktop/agent/storage\\splits\\d417a5bf-11cd-4009-8817-01b76bfb14cd\\공원녹지과.xlsx",
+            "C:/Users/lasni/Desktop/agent/storage\\splits\\d417a5bf-11cd-4009-8817-01b76bfb14cd\\교통행정과.xlsx",
+            "C:/Users/lasni/Desktop/agent/storage\\splits\\d417a5bf-11cd-4009-8817-01b76bfb14cd\\균형개발과.xlsx",
+            "C:/Users/lasni/Desktop/agent/storage\\splits\\d417a5bf-11cd-4009-8817-01b76bfb14cd\\기획예산담당관.xlsx",
+            "C:/Users/lasni/Desktop/agent/storage\\splits\\d417a5bf-11cd-4009-8817-01b76bfb14cd\\노인장애인복지과.xlsx",
+            "C:/Users/lasni/Desktop/agent/storage\\splits\\d417a5bf-11cd-4009-8817-01b76bfb14cd\\도로과.xlsx",
+            "C:/Users/lasni/Desktop/agent/storage\\splits\\d417a5bf-11cd-4009-8817-01b76bfb14cd\\도시개발과.xlsx",
+            "C:/Users/lasni/Desktop/agent/storage\\splits\\d417a5bf-11cd-4009-8817-01b76bfb14cd\\도시계획과.xlsx",
+            "C:/Users/lasni/Desktop/agent/storage\\splits\\d417a5bf-11cd-4009-8817-01b76bfb14cd\\문화예술과.xlsx",
+            "C:/Users/lasni/Desktop/agent/storage\\splits\\d417a5bf-11cd-4009-8817-01b76bfb14cd\\미지정.xlsx",
+            "C:/Users/lasni/Desktop/agent/storage\\splits\\d417a5bf-11cd-4009-8817-01b76bfb14cd\\민원봉사과.xlsx",
+            "C:/Users/lasni/Desktop/agent/storage\\splits\\d417a5bf-11cd-4009-8817-01b76bfb14cd\\보건정책과.xlsx",
+            "C:/Users/lasni/Desktop/agent/storage\\splits\\d417a5bf-11cd-4009-8817-01b76bfb14cd\\복지정책과.xlsx",
+            "C:/Users/lasni/Desktop/agent/storage\\splits\\d417a5bf-11cd-4009-8817-01b76bfb14cd\\부서명.xlsx",
+            "C:/Users/lasni/Desktop/agent/storage\\splits\\d417a5bf-11cd-4009-8817-01b76bfb14cd\\산업지원과.xlsx",
+            "C:/Users/lasni/Desktop/agent/storage\\splits\\d417a5bf-11cd-4009-8817-01b76bfb14cd\\세정과.xlsx",
+            "C:/Users/lasni/Desktop/agent/storage\\splits\\d417a5bf-11cd-4009-8817-01b76bfb14cd\\수택1동.xlsx",
+            "C:/Users/lasni/Desktop/agent/storage\\splits\\d417a5bf-11cd-4009-8817-01b76bfb14cd\\수택2동.xlsx",
+            "C:/Users/lasni/Desktop/agent/storage\\splits\\d417a5bf-11cd-4009-8817-01b76bfb14cd\\시립도서관.xlsx",
+            "C:/Users/lasni/Desktop/agent/storage\\splits\\d417a5bf-11cd-4009-8817-01b76bfb14cd\\안전총괄과.xlsx",
+            "C:/Users/lasni/Desktop/agent/storage\\splits\\d417a5bf-11cd-4009-8817-01b76bfb14cd\\위생안전과.xlsx",
+            "C:/Users/lasni/Desktop/agent/storage\\splits\\d417a5bf-11cd-4009-8817-01b76bfb14cd\\의회사무과.xlsx",
+            "C:/Users/lasni/Desktop/agent/storage\\splits\\d417a5bf-11cd-4009-8817-01b76bfb14cd\\인창동.xlsx",
+            "C:/Users/lasni/Desktop/agent/storage\\splits\\d417a5bf-11cd-4009-8817-01b76bfb14cd\\일자리경제과.xlsx",
+            "C:/Users/lasni/Desktop/agent/storage\\splits\\d417a5bf-11cd-4009-8817-01b76bfb14cd\\자동차관리과.xlsx",
+            "C:/Users/lasni/Desktop/agent/storage\\splits\\d417a5bf-11cd-4009-8817-01b76bfb14cd\\자원순환과.xlsx",
+            "C:/Users/lasni/Desktop/agent/storage\\splits\\d417a5bf-11cd-4009-8817-01b76bfb14cd\\정보통신과.xlsx",
+            "C:/Users/lasni/Desktop/agent/storage\\splits\\d417a5bf-11cd-4009-8817-01b76bfb14cd\\지역보건과.xlsx",
+            "C:/Users/lasni/Desktop/agent/storage\\splits\\d417a5bf-11cd-4009-8817-01b76bfb14cd\\징수과.xlsx",
+            "C:/Users/lasni/Desktop/agent/storage\\splits\\d417a5bf-11cd-4009-8817-01b76bfb14cd\\총무과.xlsx",
+            "C:/Users/lasni/Desktop/agent/storage\\splits\\d417a5bf-11cd-4009-8817-01b76bfb14cd\\토지정보과.xlsx",
+            "C:/Users/lasni/Desktop/agent/storage\\splits\\d417a5bf-11cd-4009-8817-01b76bfb14cd\\평생학습과.xlsx",
+            "C:/Users/lasni/Desktop/agent/storage\\splits\\d417a5bf-11cd-4009-8817-01b76bfb14cd\\하수과.xlsx",
+            "C:/Users/lasni/Desktop/agent/storage\\splits\\d417a5bf-11cd-4009-8817-01b76bfb14cd\\홍보협력담당관.xlsx",
+            "C:/Users/lasni/Desktop/agent/storage\\splits\\d417a5bf-11cd-4009-8817-01b76bfb14cd\\환경과.xlsx",
+            "C:/Users/lasni/Desktop/agent/storage\\splits\\d417a5bf-11cd-4009-8817-01b76bfb14cd\\회계과.xlsx"
+          ],
+          "flatten": true,
+          "split": "by_department"
+        },
+        "in": [],
+        "out": [
+          "merged_table"
+        ]
+      },
+      {
+        "id": "validate",
+        "type": "validate_with_pdf",
+        "label": "검증(exists/sum_check)",
+        "config": {
+          "table_in": "merge_xlsx.merged_table",
+          "tolerance": 0.005
+        },
+        "in": [
+          "merge_xlsx.merged_table"
+        ],
+        "out": [
+          "validation_report"
+        ]
+      },
+      {
+        "id": "export",
+        "type": "export_xlsx",
+        "label": "XLSX 내보내기",
+        "config": {
+          "table_in": "merge_xlsx.merged_table",
+          "filename": "2025년도 제3회 일반 및 기타특별회계 추가경정예산서(세출-검색용).xlsx"
+        },
+        "in": [
+          "merge_xlsx.merged_table"
+        ],
+        "out": [
+          "artifact_path"
+        ]
+      }
+    ],
+    "edges": [
+      {
+        "from": "parse_pdf",
+        "to": "embed_pdf"
+      },
+      {
+        "from": "merge_xlsx",
+        "to": "validate"
+      },
+      {
+        "from": "validate",
+        "to": "export"
+      }
+    ],
+    "createdAt": "2025-10-22T06:27:01.393997+00:00",
+    "updatedAt": "2025-10-22T06:27:01.394997+00:00"
+  },
+  "startedAt": "2025-10-22T06:27:12.800139+00:00",
+  "endedAt": "2025-10-22T06:27:33.476121+00:00",
+  "artifactId": null,
+  "checkpoint": null
+}

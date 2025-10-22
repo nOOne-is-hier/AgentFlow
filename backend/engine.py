@@ -1,13 +1,16 @@
 from __future__ import annotations
-import os, re, json, math, io
-from typing import Dict, Any, List, Tuple
+import os, re, json, io
+from typing import Dict, Any, List, Tuple, Optional
 from dataclasses import dataclass
 from datetime import datetime, timezone
+
 import numpy as np
-from pypdf import PdfReader
 import pandas as pd
 
-KST = timezone.utc  # simplify; display handled by client
+from .settings import TMP_DIR, ART_DIR
+from .vectorstore import ChromaVS, VSDoc, new_id
+
+KST = timezone.utc  # 간소화: 표시는 클라이언트에서
 
 
 def now_iso():
@@ -21,152 +24,43 @@ class Ctx:
     art_dir: str
 
 
-# ----------------- Helpers -----------------
+# ---------- Helpers ----------
+def _ensure_df(obj) -> pd.DataFrame:
+    if isinstance(obj, pd.DataFrame):
+        return obj
+    if isinstance(obj, str) and os.path.exists(obj):
+        low = obj.lower()
+        if low.endswith(".parquet"):
+            return pd.read_parquet(obj)
+        if low.endswith(".xlsx"):
+            return pd.read_excel(obj, engine="openpyxl")
+        if low.endswith(".csv"):
+            return pd.read_csv(obj)
+    if isinstance(obj, (dict, list)):
+        return pd.DataFrame(obj)
+    return pd.DataFrame()
 
 
-def _tok(text: str) -> List[str]:
-    # naive tokenization for ko/en
-    text = re.sub(r"[\t\r\f]+", " ", text)
-    text = re.sub(r"[\-–—\.,:;!?()\[\]{}<>\'\"]", " ", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    return [t for t in text.split(" ") if t]
-
-
-def _hash_embed(tokens: List[str], dim: int = 512) -> np.ndarray:
-    v = np.zeros(dim, dtype=np.float32)
-    for t in tokens:
-        idx = hash(t) % dim
-        v[idx] += 1.0
-    # l2 normalize
-    n = np.linalg.norm(v)
-    if n > 0:
-        v = v / n
-    return v
-
-
-# ----------------- Nodes -----------------
-
-
-def node_parse_pdf(cfg: Dict[str, Any]) -> Dict[str, Any]:
-    path = cfg["pdf_path"]
-    chunk_size = int(cfg.get("chunk_size", 1200))
-    overlap = int(cfg.get("overlap", 200))
-    reader = PdfReader(path)
-    chunks: List[Dict[str, Any]] = []
-    for i, page in enumerate(reader.pages, start=1):
-        try:
-            text = page.extract_text() or ""
-        except Exception:
-            text = ""
-        text = re.sub(r"\s+", " ", text)
-        # sliding window
-        if not text:
-            continue
-        start = 0
-        while start < len(text):
-            end = min(start + chunk_size, len(text))
-            snippet = text[start:end]
-            chunks.append({"page": i, "text": snippet})
-            if end == len(text):
-                break
-            start = max(0, end - overlap)
-    return {"pdf_chunks": chunks}
-
-
-def node_embed_pdf(cfg: Dict[str, Any], inputs: Dict[str, Any]) -> Dict[str, Any]:
-    # inputs expects parse_pdf.pdf_chunks
-    key = cfg.get("chunks_in", "parse_pdf.pdf_chunks")
-    chunks = _dig(inputs, key)
-    vecs: List[np.ndarray] = []
-    for ch in chunks:
-        toks = _tok(ch.get("text", ""))
-        vecs.append(_hash_embed(toks))
-    arr = np.stack(vecs) if vecs else np.zeros((0, 512), dtype=np.float32)
-    return {
-        "pdf_embeddings": {
-            "shape": arr.shape,
-            "data": arr.tolist(),
-            "pages": [c.get("page", 1) for c in chunks],
-            "texts": [c.get("text", "") for c in chunks],
-        }
-    }
-
-
-def node_build_vectorstore(
-    cfg: Dict[str, Any], inputs: Dict[str, Any], ctx: Ctx
-) -> Dict[str, Any]:
-    emb = _dig(inputs, cfg.get("embeddings_in", "embed_pdf.pdf_embeddings"))
-    arr = np.array(emb["data"], dtype=np.float32)
-    pages = emb.get("pages", [])
-    texts = emb.get("texts", [])
-    os.makedirs(os.path.join(ctx.storage, "vs"), exist_ok=True)
-    rid = f"vs-{ctx.run_id[:8]}"
-    path = os.path.join(ctx.storage, "vs", f"{rid}.npz")
-    np.savez_compressed(
-        path, data=arr, pages=np.array(pages), texts=np.array(texts, dtype=object)
-    )
-    return {"vs_ref": path}
-
-
-def node_merge_xlsx(cfg: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    병합 규칙:
-      - cfg.xlsx_paths: string[] 이면 모든 파일을 concat
-      - 아니면 cfg.xlsx_path: string 단일 파일과 호환
-    """
-
-    def read_one(xp: str) -> List[pd.DataFrame]:
-        if not xp or not os.path.exists(xp):
-            raise FileNotFoundError(xp)
-        all_sheets = pd.read_excel(xp, sheet_name=None)
-        out = []
-        for name, df in all_sheets.items():
-            df = df.copy()
-            df["__sheet__"] = name
-            df["__file__"] = os.path.basename(xp)
-            out.append(df)
-        return out
-
-    flatten = bool(cfg.get("flatten", True))
-    paths = cfg.get("xlsx_paths")
-    frames: List[pd.DataFrame] = []
-
-    if paths and isinstance(paths, list) and len(paths) > 0:
-        for xp in paths:
-            frames.extend(read_one(xp))
-    else:
-        xlsx_path = cfg.get("xlsx_path")
-        if not xlsx_path:
-            raise FileNotFoundError("xlsx_paths 또는 xlsx_path 미지정")
-        frames.extend(read_one(xlsx_path))
-
-    merged = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
-    if flatten:
-        merged.columns = [str(c).strip() for c in merged.columns]
-    return {"merged_table": merged}
-
-
-def _auto_detect_columns(df: pd.DataFrame) -> Tuple[str, str]:
-    # heuristics for department and amount column names
-    cand_dept = [
-        c
-        for c in df.columns
-        if any(k in str(c) for k in ["부서", "부문", "팀", "과", "기관", "부서명"])
-    ]
-    dept_col = cand_dept[0] if cand_dept else df.columns[0]
-    num_cols = [
-        c
-        for c in df.columns
-        if df[c].dtype.kind in "fi" or re.search(r"(금액|합계|총액|세출|지출)", str(c))
-    ]
-    amt_col = num_cols[0] if num_cols else df.columns[-1]
-    return dept_col, amt_col
+def _dig(obj: dict, dotted: str):
+    if dotted in obj:
+        return obj[dotted]
+    if "." in dotted:
+        last = dotted.split(".")[-1]
+        if last in obj:
+            return obj[last]
+    cur = obj
+    for part in dotted.split("."):
+        if isinstance(cur, dict) and part in cur:
+            cur = cur[part]
+        else:
+            return None
+    return cur
 
 
 def _numbers_in_text(s: str) -> List[int]:
-    nums = re.findall(r"\d{1,3}(?:,\d{3})*|\d+", s)
+    ns = re.findall(r"\d{1,3}(?:,\d{3})*|\d+", s)
     out = []
-    for n in nums:
+    for n in ns:
         try:
             out.append(int(n.replace(",", "")))
         except Exception:
@@ -174,18 +68,159 @@ def _numbers_in_text(s: str) -> List[int]:
     return out
 
 
+# ---------- PDF ----------
+try:
+    import fitz  # PyMuPDF
+
+    USE_FITZ = True
+except Exception:
+    USE_FITZ = False
+    from pypdf import PdfReader  # lazy fallback
+
+
+def node_parse_pdf(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    path = cfg["pdf_path"]
+    chunk_size = int(cfg.get("chunk_size", 1200))
+    overlap = int(cfg.get("overlap", 200))
+    chunks: List[Dict[str, Any]] = []
+
+    if USE_FITZ:
+        doc = fitz.open(path)
+        for i, page in enumerate(doc, start=1):
+            text = page.get_text("text") or ""
+            text = re.sub(r"\s+", " ", text)
+            start = 0
+            while start < len(text):
+                end = min(start + chunk_size, len(text))
+                snippet = text[start:end]
+                chunks.append({"page": i, "text": snippet})
+                if end == len(text):
+                    break
+                start = max(0, end - overlap)
+    else:
+        reader = PdfReader(path)
+        for i, page in enumerate(reader.pages, start=1):
+            try:
+                text = page.extract_text() or ""
+            except Exception:
+                text = ""
+            text = re.sub(r"\s+", " ", text)
+            if not text:
+                continue
+            start = 0
+            while start < len(text):
+                end = min(start + chunk_size, len(text))
+                snippet = text[start:end]
+                chunks.append({"page": i, "text": snippet})
+                if end == len(text):
+                    break
+                start = max(0, end - overlap)
+
+    return {"pdf_chunks": chunks, "pdf_pages": int(chunks[-1]["page"]) if chunks else 0}
+
+
+# ---------- VectorStore(Chroma) ----------
+def node_embed_pdf_to_chroma(
+    cfg: Dict[str, Any], inputs: Dict[str, Any]
+) -> Dict[str, Any]:
+    key = cfg.get("chunks_in", "parse_pdf.pdf_chunks")
+    chunks: List[Dict[str, Any]] = _dig(inputs, key) or []
+    if not chunks:
+        return {"vs_ref": None, "vs_count": 0}
+
+    vs = ChromaVS()
+    # 리셋 여부 옵션(기본: 덮어쓰기 방지 위해 새 id 부여)
+    reset = bool(cfg.get("reset", True))
+    if reset:
+        vs.reset()
+
+    docs: List[VSDoc] = []
+    for idx, ch in enumerate(chunks, start=1):
+        docs.append(
+            VSDoc(
+                id=new_id("pdf"),
+                text=ch.get("text", "")[:4000],
+                metadata={"page": int(ch.get("page", 1)), "chunk_index": idx},
+            )
+        )
+    vs.upsert(docs)
+    return {"vs_ref": "chroma://", "vs_count": len(docs)}
+
+
+# ---------- XLSX 병합 ----------
+def node_merge_xlsx(
+    cfg: Dict[str, Any], inputs: Dict[str, Any], ctx: Ctx
+) -> Dict[str, Any]:
+    import pandas as pd
+
+    def read_one(xp: str) -> List[pd.DataFrame]:
+        if not xp or not os.path.exists(xp):
+            raise FileNotFoundError(xp)
+        sheets = pd.read_excel(xp, sheet_name=None, engine="openpyxl")
+        out = []
+        for name, df in sheets.items():
+            d = df.copy()
+            d["__sheet__"] = name
+            d["__file__"] = os.path.basename(xp)
+            out.append(d)
+        return out
+
+    paths = cfg.get("xlsx_paths") or []
+    frames: List[pd.DataFrame] = []
+    for xp in paths:
+        frames.extend(read_one(xp))
+
+    merged = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    merged.columns = [str(c).strip() for c in merged.columns]
+
+    # 저장(Parquet->CSV 폴백)
+    from .settings import TMP_DIR
+
+    parquet_path = os.path.join(TMP_DIR, f"{ctx.run_id[:8]}_merged.parquet")
+    csv_path = os.path.join(TMP_DIR, f"{ctx.run_id[:8]}_merged.csv")
+    out_path = None
+    try:
+        merged.to_parquet(parquet_path, index=False)
+        out_path = parquet_path
+    except Exception:
+        merged.to_csv(csv_path, index=False)
+        out_path = csv_path
+
+    return {
+        "merged_table": merged,
+        "merged_path": out_path,
+        "merged_rows": int(len(merged)),
+    }
+
+
+# ---------- 검증 (exists/sum_check) ----------
+def _auto_detect_columns(df: pd.DataFrame) -> Tuple[str, str]:
+    cand_dept = [
+        c
+        for c in df.columns
+        if any(k in str(c) for k in ["부서", "부문", "팀", "과", "기관", "부서명"])
+    ]
+    dept_col = cand_dept[0] if cand_dept else str(df.columns[0])
+    num_cols = [
+        c
+        for c in df.columns
+        if (df[c].dtype.kind in "fi")
+        or re.search(r"(금액|합계|총액|세출|지출|예산액|기정액|비교증감)", str(c))
+    ]
+    amt_col = num_cols[0] if num_cols else str(df.columns[-1])
+    return dept_col, amt_col
+
+
 def node_validate_with_pdf(
     cfg: Dict[str, Any], inputs: Dict[str, Any]
 ) -> Dict[str, Any]:
-    # table_in: merge_xlsx.merged_table, vs_in (optional), tolerance
-    table = _dig(inputs, cfg.get("table_in", "merge_xlsx.merged_table"))
-    chunks = _dig(inputs, "parse_pdf.pdf_chunks")  # for evidence
+    import pandas as pd
+    from .vectorstore import ChromaVS
+
+    table_ref = _dig(inputs, cfg.get("table_in", "merge_xlsx.merged_table"))
+    df = _ensure_df(table_ref)
     tol = float(cfg.get("tolerance", 0.005))
-    if isinstance(table, pd.DataFrame):
-        df = table.copy()
-    else:
-        # best-effort conversion
-        df = pd.DataFrame(table)
+
     if df.empty:
         return {
             "validation_report": {
@@ -197,45 +232,40 @@ def node_validate_with_pdf(
         }
 
     dept_col, amt_col = _auto_detect_columns(df)
+
+    # 금액 전처리
+    s = df[amt_col].astype(str).str.strip()
+    s = (
+        s.str.replace(r"\(([^)]+)\)", r"-\1", regex=True)
+        .str.replace(",", "", regex=False)
+        .str.replace(r"[^0-9\.\-]", "", regex=True)
+    )
+    df["_amt_"] = pd.to_numeric(s, errors="coerce")
+
+    grouped = df.groupby(dept_col)["_amt_"].sum(numeric_only=True).fillna(0)
+
+    vs = ChromaVS()
     items = []
     ok = warn = fail = 0
 
-    # simple per-dept aggregation
-    s = df[amt_col].astype(str).str.strip()
-
-    s = s.str.replace(r"^\\((\\1))$", r"-\\g<1>", regex=True)  # (1,234) -> -1,234
-
-    s = s.str.replace(",", "", regex=False)
-
-    s = s.str.replace(r"[^0-9\.\-]", "", regex=True)
-
-    df["_amt_"] = pd.to_numeric(s, errors="coerce")
-
-    grouped = df.groupby(dept_col)["_amt_"].sum()
-
-    # index chunks by page
-    by_page: Dict[int, List[Dict[str, Any]]] = {}
-    for ch in chunks:
-        by_page.setdefault(int(ch.get("page", 1)), []).append(ch)
-
     for dept, expected in grouped.items():
-        dept_str = str(dept)
-        # exists: find any chunk containing dept string
-        evid: List[Dict[str, Any]] = []
-        pages_hit = []
-        for ch in chunks:
-            if dept_str and dept_str in ch.get("text", ""):
-                pages_hit.append(int(ch.get("page", 1)))
-                evid.append(
-                    {
-                        "page": int(ch.get("page", 1)),
-                        "snippet": ch.get("text", "")[:180],
-                    }
-                )
-                break
+        dept_str = str(dept).strip()
+        # exists: 벡터 질의
+        q = f"{dept_str} 부서 예산 총괄 표 또는 조직 표기"
+        hits = vs.query(q, k=3)
+        evid = []
+        for h in hits:
+            page = int(h["metadata"].get("page", 1))
+            text = h["text"][:180]
+            evid.append({"page": page, "snippet": text})
         if evid:
             items.append(
-                {"policy": "exists", "dept": dept_str, "status": "ok", "evidence": evid}
+                {
+                    "policy": "exists",
+                    "dept": dept_str,
+                    "status": "ok",
+                    "evidence": evid[:1],
+                }
             )
             ok += 1
         else:
@@ -244,22 +274,17 @@ def node_validate_with_pdf(
             )
             fail += 1
 
-        # sum_check: look into numbers on the same page if exists
+        # sum_check: 해당 증거 페이지의 숫자 중 기대값과 가까운 수치 선택
         found = None
         if evid:
-            p = evid[0]["page"]
-            texts = [c.get("text", "") for c in by_page.get(p, [])]
-            nums = []
-            for t in texts:
-                nums.extend(_numbers_in_text(t))
-            # heuristic: pick the closest number to expected by relative error
+            nums = _numbers_in_text(" ".join([e["snippet"] for e in evid]))
             if nums:
                 nums_sorted = sorted(
-                    nums, key=lambda x: abs((x - expected) / (expected + 1e-9))
+                    nums, key=lambda x: abs((x - expected) / (abs(expected) + 1e-9))
                 )
                 found = nums_sorted[0]
+
         if found is None:
-            # fallback: not enough evidence
             items.append(
                 {
                     "policy": "sum_check",
@@ -268,12 +293,13 @@ def node_validate_with_pdf(
                     "expected": int(expected),
                     "found": 0,
                     "delta": int(expected),
+                    "evidence": evid[:1],
                 }
             )
             warn += 1
         else:
             delta = int(found) - int(expected)
-            status = "ok" if (abs(delta) <= max(1, int(expected * tol))) else "diff"
+            status = "ok" if abs(delta) <= max(1, int(abs(expected) * tol)) else "diff"
             if status == "ok":
                 ok += 1
             else:
@@ -286,89 +312,59 @@ def node_validate_with_pdf(
                     "expected": int(expected),
                     "found": int(found),
                     "delta": int(delta),
-                    "evidence": evid,
+                    "evidence": evid[:1],
                 }
             )
 
-    summary = {"ok": int(ok), "warn": int(warn), "fail": int(fail)}
-    return {"validation_report": {"summary": summary, "items": items}}
+    return {
+        "validation_report": {
+            "summary": {"ok": int(ok), "warn": int(warn), "fail": int(fail)},
+            "items": items,
+        }
+    }
 
 
-# --- node_export_xlsx: 다운로드 파일명(meta) 반영 ---
+# ---------- Export (검증결과는 포함하지 않음) ----------
 def node_export_xlsx(
     cfg: Dict[str, Any], inputs: Dict[str, Any], ctx: Ctx
 ) -> Dict[str, Any]:
-    table = _dig(inputs, cfg.get("table_in", "merge_xlsx.merged_table"))
-    report = _dig(inputs, "validate_with_pdf.validation_report")
-    # 기본 파일명(요구사항 반영)
+    df = _ensure_df(_dig(inputs, cfg.get("table_in", "merge_xlsx.merged_table")))
     name = cfg.get(
         "filename",
         "2025년도 제3회 일반 및 기타특별회계 추가경정예산서(세출-검색용).xlsx",
     )
 
-    os.makedirs(ctx.art_dir, exist_ok=True)
     art_id = f"art-{ctx.run_id[:8]}"
     path = os.path.join(ctx.art_dir, f"{art_id}.xlsx")
-
     with pd.ExcelWriter(path) as w:
-        (table if isinstance(table, pd.DataFrame) else pd.DataFrame(table)).to_excel(
-            w, index=False, sheet_name="merged"
-        )
-        if report:
-            pd.DataFrame([report.get("summary", {})]).to_excel(
-                w, index=False, sheet_name="summary"
-            )
-            pd.DataFrame(report.get("items", [])).to_excel(
-                w, index=False, sheet_name="items"
-            )
+        df.to_excel(w, index=False, sheet_name="merged")
+
+    meta_path = os.path.join(ctx.art_dir, f"{art_id}.meta.json")
+    with open(meta_path, "w", encoding="utf-8") as f:
+        json.dump({"display_name": name}, f, ensure_ascii=False, indent=2)
 
     return {"artifact_path": path, "artifact_id": art_id}
 
 
-# ----------------- Executor -----------------
-
+# ---------- 순차 실행기 (OBS 세분화) ----------
 NODE_IMPLS = {
     "parse_pdf": node_parse_pdf,
-    "embed_pdf": node_embed_pdf,
-    "build_vectorstore": node_build_vectorstore,
+    "embed_pdf": node_embed_pdf_to_chroma,
+    "build_vectorstore": lambda cfg, inputs, ctx: {
+        "vs_ref": "chroma://"
+    },  # 호환용 더미
     "merge_xlsx": node_merge_xlsx,
     "validate_with_pdf": node_validate_with_pdf,
     "export_xlsx": node_export_xlsx,
 }
 
 
-def _dig(obj: dict, dotted: str):
-    """
-    Resolve values from the flat outputs map.
-
-    Priority:
-      1) exact top-level key (incl. 'node.output')
-      2) last-segment fallback (e.g., 'pdf_chunks')
-      3) nested walking
-    """
-    # 1) exact top-level
-    if dotted in obj:
-        return obj[dotted]
-    # 2) fallback to last segment
-    if "." in dotted:
-        last = dotted.split(".")[-1]
-        if last in obj:
-            return obj[last]
-    # 3) nested walking
-    cur = obj
-    for part in dotted.split("."):
-        if isinstance(cur, dict) and part in cur:
-            cur = cur[part]
-        else:
-            return None
-    return cur
-
-
 def execute_stream(workflow: Dict[str, Any], ctx: Ctx):
-    # generator of SSE-friendly events while executing nodes sequentially
     outputs: Dict[str, Any] = {}
 
-    def ev(_type: str, node_id: str, message: str, detail: Dict[str, Any] = None):
+    def ev(
+        _type: str, node_id: str, message: str, detail: Dict[str, Any] | None = None
+    ):
         return {
             "type": _type,
             "nodeId": node_id,
@@ -385,30 +381,73 @@ def execute_stream(workflow: Dict[str, Any], ctx: Ctx):
     )
 
     for node in workflow.get("nodes", []):
-        nid = node["id"]
-        ntype = node["type"]
-        cfg = node.get("config", {})
+        nid, ntype = node["id"], node["type"]
+        cfg = node.get("config", {}) or {}
         yield ev("ACTION", nid, f"{nid}({ntype}) 시작")
+
         impl = NODE_IMPLS.get(ntype)
+        if not impl:
+            yield ev("SUMMARY", nid, f"{nid} 실패: no impl for {ntype}")
+            raise RuntimeError(f"no impl for {ntype}")
+
         try:
-            if not impl:
-                raise RuntimeError(f"no impl for {ntype}")
-            if ntype in ("embed_pdf", "validate_with_pdf"):
+            if ntype in ("validate_with_pdf",):
                 out = impl(cfg, {**outputs})
-            elif ntype in ("build_vectorstore", "export_xlsx"):
+            elif ntype in ("merge_xlsx", "export_xlsx"):
                 out = impl(cfg, {**outputs}, ctx)
+            elif ntype in ("embed_pdf", "build_vectorstore"):
+                out = (
+                    impl(cfg, {**outputs}, ctx)
+                    if impl.__code__.co_argcount >= 3
+                    else impl(cfg, {**outputs})
+                )
             else:
                 out = impl(cfg)
-            # store outputs under both short key and namespaced key
+
+            # OBS 세분화
+            if ntype == "parse_pdf":
+                yield ev(
+                    "OBS",
+                    nid,
+                    "PDF 청킹 완료",
+                    {
+                        "chunks": len(out.get("pdf_chunks", [])),
+                        "pages": out.get("pdf_pages", 0),
+                    },
+                )
+            if ntype == "embed_pdf":
+                yield ev(
+                    "OBS", nid, "임베딩/색인 완료", {"count": out.get("vs_count", 0)}
+                )
+            if ntype == "merge_xlsx":
+                yield ev(
+                    "OBS", nid, "XLSX 병합 완료", {"rows": out.get("merged_rows", 0)}
+                )
+            if ntype == "validate_with_pdf":
+                s = out.get("validation_report", {}).get("summary", {})
+                yield ev(
+                    "OBS",
+                    nid,
+                    "검증 요약",
+                    {
+                        "ok": s.get("ok", 0),
+                        "warn": s.get("warn", 0),
+                        "fail": s.get("fail", 0),
+                    },
+                )
+            if ntype == "export_xlsx":
+                yield ev(
+                    "OBS", nid, "산출물 경로", {"artifact_id": out.get("artifact_id")}
+                )
+
             for k, v in out.items():
                 outputs[k] = v
                 outputs[f"{nid}.{k}"] = v
+
             yield ev("SUMMARY", nid, f"{nid} 완료", {"keys": list(out.keys())})
         except Exception as e:
             yield ev("SUMMARY", nid, f"{nid} 실패: {e.__class__.__name__}: {e}")
             raise
 
-    # finalize
-    art = outputs.get("artifact_path") or outputs.get("export.artifact_path")
-    art_id = outputs.get("artifact_id") or outputs.get("export.artifact_id")
-    yield ev("SUMMARY", "export", "산출물 생성", {"artifactId": art_id, "path": art})
+    art = outputs.get("artifact_id") or outputs.get("export.artifact_id")
+    yield ev("SUMMARY", "export", "산출물 생성", {"artifactId": art})
