@@ -1,0 +1,24 @@
+{
+  "id": "string",
+  "name": "string",
+  "nodes": [
+    {
+      "id": "string",
+      "type": "parse_pdf",
+      "label": "string",
+      "config": {},
+      "in": [
+        "string"
+      ],
+      "out": [
+        "pdf_chunks"
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "from": "string",
+      "to": "string"
+    }
+  ],
+  "createdAt": 

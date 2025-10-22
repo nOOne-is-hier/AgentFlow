@@ -1,0 +1,124 @@
+{
+  "id": "wf-edd480b0",
+  "name": "Budget-Validation",
+  "nodes": [
+    {
+      "id": "parse_pdf",
+      "type": "parse_pdf",
+      "label": "PDF 파싱",
+      "config": {
+        "pdf_path": "C:\\Users\\lasni\\Desktop\\agent\\storage\\uploads\\456a5abd-e0ca-4eb0-b96e-ac534f7c5840.pdf",
+        "chunk_size": 1200,
+        "overlap": 200
+      },
+      "in": [],
+      "out": [
+        "pdf_chunks"
+      ]
+    },
+    {
+      "id": "embed_pdf",
+      "type": "embed_pdf",
+      "label": "PDF 임베딩",
+      "config": {
+        "chunks_in": "parse_pdf.pdf_chunks",
+        "model": "text-embedding-3-small"
+      },
+      "in": [
+        "parse_pdf.pdf_chunks"
+      ],
+      "out": [
+        "pdf_embeddings"
+      ]
+    },
+    {
+      "id": "build_vs",
+      "type": "build_vectorstore",
+      "label": "VectorStore",
+      "config": {
+        "embeddings_in": "embed_pdf.pdf_embeddings",
+        "collection": "budget_pdf"
+      },
+      "in": [
+        "embed_pdf.pdf_embeddings"
+      ],
+      "out": [
+        "vs_ref"
+      ]
+    },
+    {
+      "id": "merge_xlsx",
+      "type": "merge_xlsx",
+      "label": "XLSX 병합",
+      "config": {
+        "xlsx_path": "C:\\Users\\lasni\\Desktop\\agent\\storage\\uploads\\d417a5bf-11cd-4009-8817-01b76bfb14cd.xlsx",
+        "flatten": true,
+        "split": "by_department"
+      },
+      "in": [],
+      "out": [
+        "merged_table"
+      ]
+    },
+    {
+      "id": "validate",
+      "type": "validate_with_pdf",
+      "label": "검증",
+      "config": {
+        "table_in": "merge_xlsx.merged_table",
+        "vs_in": "build_vs.vs_ref",
+        "policies": [
+          "exists",
+          "sum_check"
+        ],
+        "tolerance": 0.005
+      },
+      "in": [
+        "merge_xlsx.merged_table",
+        "build_vs.vs_ref"
+      ],
+      "out": [
+        "validation_report"
+      ]
+    },
+    {
+      "id": "export",
+      "type": "export_xlsx",
+      "label": "XLSX 내보내기",
+      "config": {
+        "table_in": "merge_xlsx.merged_table",
+        "filename": "검증결과.xlsx"
+      },
+      "in": [
+        "merge_xlsx.merged_table"
+      ],
+      "out": [
+        "artifact_path"
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "from": "parse_pdf",
+      "to": "embed_pdf"
+    },
+    {
+      "from": "embed_pdf",
+      "to": "build_vs"
+    },
+    {
+      "from": "merge_xlsx",
+      "to": "validate"
+    },
+    {
+      "from": "build_vs",
+      "to": "validate"
+    },
+    {
+      "from": "validate",
+      "to": "export"
+    }
+  ],
+  "createdAt": "2025-10-22T00:55:18.524702+00:00",
+  "updatedAt": "2025-10-22T00:55:18.524702+00:00"
+}
