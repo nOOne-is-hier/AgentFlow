@@ -65,6 +65,8 @@ def _parse_dt(s: str) -> float:
 
 
 # ---------- 최신 splits/파일 선택 ----------
+
+
 def _latest_splits_xlsx_paths() -> List[str]:
     base = os.path.join(STORAGE, "splits")
     if not os.path.isdir(base):
@@ -510,7 +512,10 @@ def wf_list():
 def wf_save(wf: Workflow):
     path = os.path.join(WF_DIR, f"{wf.id}.json")
     with open(path, "w", encoding="utf-8") as f:
-        json.dump(wf.model_dump(by_alias=True), f, ensure_ascii=False, indent=2)
+        # Use mode='json' to properly serialize datetime objects
+        json.dump(
+            wf.model_dump(by_alias=True, mode="json"), f, ensure_ascii=False, indent=2
+        )
     return {"id": wf.id}
 
 
