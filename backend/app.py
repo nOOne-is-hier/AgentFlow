@@ -4,7 +4,7 @@ from uuid import uuid4
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional, Tuple
 
-from fastapi import FastAPI, UploadFile, File, HTTPException, Response
+from fastapi import FastAPI, UploadFile, File, HTTPException, Response, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, FileResponse
 from pydantic import BaseModel, Field
@@ -59,6 +59,33 @@ def _load_json(path: str, default: Any):
 
 
 # 상단 유틸 근처에 추가
+def _latest_splits_xlsx_paths() -> List[str]:
+    base = os.path.join(STORAGE, "splits")
+    if not os.path.isdir(base):
+        return []
+    # 최신 디렉터리 찾기
+    candidates = [
+        os.path.join(base, d)
+        for d in os.listdir(base)
+        if os.path.isdir(os.path.join(base, d))
+    ]
+    latest_dir = max(candidates, key=lambda p: os.path.getmtime(p), default=None)
+    if not latest_dir:
+        return []
+    return [
+        os.path.join(latest_dir, f)
+        for f in os.listdir(latest_dir)
+        if f.lower().endswith(".xlsx")
+    ]
+
+
+def _select_latest_pdf() -> Optional[Dict[str, Any]]:
+    idx = _load_json(FILES_INDEX, {"files": []})
+    files = idx.get("files", [])
+    pdfs = [f for f in files if f.get("type") == "pdf"]
+    return max(pdfs, key=lambda x: _parse_dt(x.get("uploadedAt", "")), default=None)
+
+
 def _latest_split_dir() -> Optional[str]:
     base = os.path.join(STORAGE, "splits")
     if not os.path.isdir(base):
@@ -94,7 +121,7 @@ class LoginRes(BaseModel):
 
 
 class ChatTurnReq(BaseModel):
-    message: str = "부서별 집계 검증 파이프라인 만들어줘"
+    message: str = "업로드한 부서별 xlsx 묶음을 병합하고 pdf를 기준으로 검증해줘"
     fileIds: List[str] = Field(default_factory=list)
 
 
@@ -178,14 +205,8 @@ def _select_latest_pdf_xlsx() -> (
     return pdf, xls
 
 
-# 기존: _build_nodes_and_edges(pdf, xls) -> 다중 XLSX로 확장
-def _build_nodes_and_edges(pdf: Dict[str, Any], xls_or_paths: Any):
-    # xls_or_paths: 단일 파일(meta) or 경로 리스트
-    if isinstance(xls_or_paths, list):
-        xlsx_paths = xls_or_paths
-    else:
-        xlsx_paths = [xls_or_paths["path"]]
-
+# backend/app.py
+def _build_nodes_and_edges(pdf: Dict[str, Any], xlsx_paths: List[str]):
     nodes = [
         {
             "id": "parse_pdf",
@@ -199,6 +220,7 @@ def _build_nodes_and_edges(pdf: Dict[str, Any], xls_or_paths: Any):
             "id": "embed_pdf",
             "type": "embed_pdf",
             "label": "PDF 임베딩",
+            # 엔진은 hash512 로컬해시지만 표기는 임베딩 단계 의미. 혼동 방지 위해 그대로 둡니다.
             "config": {"chunks_in": "parse_pdf.pdf_chunks", "model": "hash512"},
             "in": ["parse_pdf.pdf_chunks"],
             "out": ["pdf_embeddings"],
@@ -214,7 +236,6 @@ def _build_nodes_and_edges(pdf: Dict[str, Any], xls_or_paths: Any):
             "in": ["embed_pdf.pdf_embeddings"],
             "out": ["vs_ref"],
         },
-        # 👇 핵심: 여러 XLSX 병합
         {
             "id": "merge_xlsx",
             "type": "merge_xlsx",
@@ -240,7 +261,6 @@ def _build_nodes_and_edges(pdf: Dict[str, Any], xls_or_paths: Any):
             "in": ["merge_xlsx.merged_table", "build_vs.vs_ref"],
             "out": ["validation_report"],
         },
-        # 👇 파일명 고정
         {
             "id": "export",
             "type": "export_xlsx",
@@ -264,44 +284,58 @@ def _build_nodes_and_edges(pdf: Dict[str, Any], xls_or_paths: Any):
 
 
 # ---------- Chat ----------
-# /chat/turn: 채팅 삽입 파일에서 '모든 XLSX'를 수집, 없으면 splits 최신 폴더 자동 탐색
 @app.post("/chat/turn", response_model=ChatTurnRes, tags=["Chat"])
-def chat_turn(req: ChatTurnReq):
+def chat_turn(
+    req: ChatTurnReq = Body(
+        examples={
+            "default-auto-splits": {
+                "summary": "PDF(최신 업로드) + splits(최신 폴더) 자동 병합",
+                "value": {"message": "부서별 병합 후 PDF 기준 검증해줘", "fileIds": []},
+            },
+            "explicit-ids": {
+                "summary": "명시적으로 업로드한 PDF/XLSX ID 지정",
+                "value": {
+                    "message": "이 파일들로 검증 파이프라인 생성",
+                    "fileIds": ["<pdf-id>", "<xlsx-id-1>", "<xlsx-id-2>"],
+                },
+            },
+        }
+    )
+):
     idx = _load_json(FILES_INDEX, {"files": []})
     idmap = {f["id"]: f for f in idx.get("files", [])}
 
-    # 명시 파일
+    # 1) PDF 결정
     pdf = next(
         (idmap[i] for i in req.fileIds if i in idmap and idmap[i]["type"] == "pdf"),
         None,
     )
-    xls_list = [
-        idmap[i]["path"]
-        for i in req.fileIds
-        if i in idmap and idmap[i]["type"] == "xlsx"
-    ]
-
-    # 보강: 최신 업로드 자동
     if not pdf:
-        pdf_auto, _ = _select_latest_pdf_xlsx()
-        pdf = pdf_auto
-
-    # 추가 보강: splits 최신 디렉터리 전체 수집
-    if not xls_list:
-        sdir = _latest_split_dir()
-        if sdir:
-            xls_list = _all_xlsx_in(sdir)
-
-    if not (pdf and xls_list):
+        pdf = _select_latest_pdf()
+    if not pdf:
         raise HTTPException(
-            400,
-            "PDF와 XLSX(여러 개)가 필요합니다. /files/upload 또는 storage/splits 준비 확인",
+            400, "PDF가 필요합니다. /files/upload 로 PDF 업로드 후 다시 시도하세요."
         )
 
-    nodes, edges = _build_nodes_and_edges(pdf, xls_list)
+    # 2) XLSX 경로 목록 결정: ID로 받은 것 + splits 자동수집
+    xlsx_paths: List[str] = []
+    for i in req.fileIds:
+        m = idmap.get(i)
+        if m and m.get("type") == "xlsx":
+            xlsx_paths.append(m["path"])
+    if not xlsx_paths:
+        xlsx_paths = _latest_splits_xlsx_paths()
+
+    if not xlsx_paths:
+        raise HTTPException(
+            400,
+            "XLSX가 필요합니다. 업로드하거나 storage/splits/<최신>에 XLSX를 배치하세요.",
+        )
+
+    nodes, edges = _build_nodes_and_edges(pdf, xlsx_paths)
     patch = {"addNodes": nodes, "addEdges": edges}
     return {
-        "assistant": f"PDF 1개, XLSX {len(xls_list)}개로 검증 그래프를 구성했습니다.",
+        "assistant": "PDF + 부서별 XLSX 묶음을 기준으로 검증 그래프를 구성했습니다.",
         "tot": {"steps": ["쿼리 이해", "계획 수립", "그래프 작성"]},
         "graphPatch": patch,
     }
@@ -337,12 +371,15 @@ def wf_get(wf_id: str):
 
 @app.post("/workflows/quickstart", tags=["Workflows"])
 def wf_quickstart():
-    pdf, xls = _select_latest_pdf_xlsx()
-    if not (pdf and xls):
+    pdf = _select_latest_pdf()
+    xlsx_paths = _latest_splits_xlsx_paths()
+    if not (pdf and xlsx_paths):
         raise HTTPException(
-            400, "최신 PDF/XLSX를 찾을 수 없습니다. /files/upload 먼저 실행"
+            400,
+            "최신 PDF 또는 splits XLSX를 찾을 수 없습니다. /files/upload 또는 storage/splits 확인",
         )
-    nodes, edges = _build_nodes_and_edges(pdf, xls)
+
+    nodes, edges = _build_nodes_and_edges(pdf, xlsx_paths)
     wf = {
         "id": f"wf-{uuid4().hex[:8]}",
         "name": "Budget-Validation",

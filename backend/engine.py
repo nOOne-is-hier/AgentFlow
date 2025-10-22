@@ -109,32 +109,39 @@ def node_build_vectorstore(
 
 
 def node_merge_xlsx(cfg: Dict[str, Any]) -> Dict[str, Any]:
-    xlsx_path = cfg.get("xlsx_path")
-    xlsx_paths = cfg.get("xlsx_paths")  # NEW: list[str]
-    flatten = bool(cfg.get("flatten", True))
+    """
+    병합 규칙:
+      - cfg.xlsx_paths: string[] 이면 모든 파일을 concat
+      - 아니면 cfg.xlsx_path: string 단일 파일과 호환
+    """
 
-    frames: List[pd.DataFrame] = []
-
-    def _read_one(path: str) -> List[pd.DataFrame]:
-        all_sheets = pd.read_excel(path, sheet_name=None)
+    def read_one(xp: str) -> List[pd.DataFrame]:
+        if not xp or not os.path.exists(xp):
+            raise FileNotFoundError(xp)
+        all_sheets = pd.read_excel(xp, sheet_name=None)
         out = []
         for name, df in all_sheets.items():
             df = df.copy()
             df["__sheet__"] = name
-            df["__source__"] = os.path.basename(path)
+            df["__file__"] = os.path.basename(xp)
             out.append(df)
         return out
 
-    if xlsx_paths:
-        for p in xlsx_paths:
-            frames.extend(_read_one(p))
-    elif xlsx_path:
-        frames.extend(_read_one(xlsx_path))
+    flatten = bool(cfg.get("flatten", True))
+    paths = cfg.get("xlsx_paths")
+    frames: List[pd.DataFrame] = []
+
+    if paths and isinstance(paths, list) and len(paths) > 0:
+        for xp in paths:
+            frames.extend(read_one(xp))
     else:
-        return {"merged_table": pd.DataFrame()}  # nothing
+        xlsx_path = cfg.get("xlsx_path")
+        if not xlsx_path:
+            raise FileNotFoundError("xlsx_paths 또는 xlsx_path 미지정")
+        frames.extend(read_one(xlsx_path))
 
     merged = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
-    if flatten and not merged.empty:
+    if flatten:
         merged.columns = [str(c).strip() for c in merged.columns]
     return {"merged_table": merged}
 
@@ -293,13 +300,14 @@ def node_export_xlsx(
 ) -> Dict[str, Any]:
     table = _dig(inputs, cfg.get("table_in", "merge_xlsx.merged_table"))
     report = _dig(inputs, "validate_with_pdf.validation_report")
-    display_name = cfg.get("filename", "validation_result.xlsx")  # 원하는 다운로드 이름
-    if not display_name.lower().endswith(".xlsx"):
-        display_name += ".xlsx"
+    # 기본 파일명(요구사항 반영)
+    name = cfg.get(
+        "filename",
+        "2025년도 제3회 일반 및 기타특별회계 추가경정예산서(세출-검색용).xlsx",
+    )
 
     os.makedirs(ctx.art_dir, exist_ok=True)
     art_id = f"art-{ctx.run_id[:8]}"
-    # 실제 저장 경로(art-id 고정), 표시 이름은 메타로 따로 저장
     path = os.path.join(ctx.art_dir, f"{art_id}.xlsx")
 
     with pd.ExcelWriter(path) as w:
@@ -313,11 +321,6 @@ def node_export_xlsx(
             pd.DataFrame(report.get("items", [])).to_excel(
                 w, index=False, sheet_name="items"
             )
-
-    # 표시 파일명 메타 저장
-    meta_path = os.path.join(ctx.art_dir, f"{art_id}.meta.json")
-    with open(meta_path, "w", encoding="utf-8") as mf:
-        json.dump({"display_name": display_name}, mf, ensure_ascii=False, indent=2)
 
     return {"artifact_path": path, "artifact_id": art_id}
 
