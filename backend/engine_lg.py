@@ -4,22 +4,25 @@ from typing import Dict, Any, List, TypedDict, Callable
 from langgraph.graph import StateGraph
 from langgraph.checkpoint.memory import MemorySaver
 
+# engine.py 에 정의된 실제 노드 구현들
 from .engine import (
     Ctx,
     now_iso,
     node_parse_pdf,
-    node_embed_pdf_to_chroma,
+    node_embed_pdf_to_chroma,  # 임베딩 + Chroma 색인
     node_merge_xlsx,
     node_validate_with_pdf,
-    node_export_xlsx,
+    # export_xlsx 는 HITL 승인 후 main에서 실행하므로 LG 내부에선 건드리지 않음
 )
 
 
+# ---- LangGraph 상태 (체크포인트 친화: 경로/스칼라/소형 dict 위주) ----
 class LGState(TypedDict, total=False):
-    pdf_chunks: list
-    validation_report: dict
-    merged_path: str
-    artifact_id: str
+    pdf_chunks: list  # [{page:int, text:str}, ...]
+    vs_ref: str  # "chroma://"
+    merged_path: str  # parquet/csv 경로
+    validation_report: dict  # 검증 결과(요약)
+    # artifact_id 는 LG 내에서는 만들지 않음 (HITL 승인 후 메인에서 export)
 
 
 EventSink = Callable[[Dict[str, Any]], None]
@@ -30,19 +33,18 @@ def _ev(_type: str, node_id: str, message: str, detail: Dict[str, Any] | None = 
         "type": _type,
         "nodeId": node_id,
         "message": message,
-        "detail": detail or {},
+        "detail": (detail or {}),
         "ts": now_iso(),
     }
 
 
 def build_langgraph(wf: Dict[str, Any], ctx: Ctx, on_event: EventSink | None = None):
     """
-    Workflow(JSON) -> LangGraph 앱으로 컴파일.
-    - 체크포인터: MemorySaver
-    - HITL: validate 이후 승인 대기 시그널 방출
+    Workflow(JSON) -> LangGraph.
+    ⚠️ 각 노드는 'delta(변경분) dict'만 return 해야 함 (전체 state 금지).
     """
     g = StateGraph(LGState)
-    node_map: Dict[str, Dict[str, Any]] = {n["id"]: n for n in wf["nodes"]}
+    node_map: Dict[str, Dict[str, Any]] = {n["id"]: n for n in wf.get("nodes", [])}
     edges: List[Dict[str, str]] = wf.get("edges", [])
 
     def add(nid: str):
@@ -54,32 +56,26 @@ def build_langgraph(wf: Dict[str, Any], ctx: Ctx, on_event: EventSink | None = N
             if on_event:
                 on_event(_ev("ACTION", nid, f"{nid}({ntype}) 시작"))
 
-            # inputs 조립
-            inputs: Dict[str, Any] = {}
-            if "pdf_chunks" in state:
-                inputs["parse_pdf.pdf_chunks"] = state["pdf_chunks"]
-            if "validation_report" in state:
-                inputs["validate_with_pdf.validation_report"] = state[
-                    "validation_report"
-                ]
-            if "merged_path" in state:
-                inputs["merge_xlsx.merged_table"] = state["merged_path"]
-
-            # 노드 실행
+            # ----- 각 노드별 실행 (delta만 리턴) -----
             if ntype == "parse_pdf":
                 out = node_parse_pdf(cfg)
-                state["pdf_chunks"] = out.get("pdf_chunks", [])
+                pdf_chunks = out.get("pdf_chunks", [])
                 if on_event:
                     on_event(
                         _ev(
                             "OBS",
                             nid,
                             "PDF 청킹 완료",
-                            {"chunks": len(state["pdf_chunks"])},
+                            {
+                                "chunks": len(pdf_chunks),
+                                "pages": out.get("pdf_pages", 0),
+                            },
                         )
                     )
+                delta: LGState = {"pdf_chunks": pdf_chunks}
 
             elif ntype == "embed_pdf":
+                # 입력은 기존 state에서 읽기만 함 (수정 금지)
                 out = node_embed_pdf_to_chroma(
                     cfg, {"parse_pdf.pdf_chunks": state.get("pdf_chunks", [])}
                 )
@@ -92,10 +88,10 @@ def build_langgraph(wf: Dict[str, Any], ctx: Ctx, on_event: EventSink | None = N
                             {"count": out.get("vs_count", 0)},
                         )
                     )
+                delta = {"vs_ref": out.get("vs_ref")}
 
             elif ntype == "merge_xlsx":
-                out = node_merge_xlsx(cfg, inputs, ctx)
-                state["merged_path"] = out.get("merged_path")
+                out = node_merge_xlsx(cfg, {}, ctx)
                 if on_event:
                     on_event(
                         _ev(
@@ -105,18 +101,16 @@ def build_langgraph(wf: Dict[str, Any], ctx: Ctx, on_event: EventSink | None = N
                             {"rows": out.get("merged_rows", 0)},
                         )
                     )
+                delta = {"merged_path": out.get("merged_path")}
 
             elif ntype == "validate_with_pdf":
+                # table_in 은 경로를 넘기면 engine 쪽이 DF 로딩
                 out = node_validate_with_pdf(
-                    cfg,
-                    {
-                        "merge_xlsx.merged_table": state.get("merged_path"),
-                        "parse_pdf.pdf_chunks": state.get("pdf_chunks"),
-                    },
+                    cfg, {"merge_xlsx.merged_table": state.get("merged_path")}
                 )
-                state["validation_report"] = out.get("validation_report", {})
-                s = state["validation_report"].get("summary", {})
+                vr = out.get("validation_report", {})
                 if on_event:
+                    s = vr.get("summary", {}) if isinstance(vr, dict) else {}
                     on_event(
                         _ev(
                             "OBS",
@@ -129,54 +123,55 @@ def build_langgraph(wf: Dict[str, Any], ctx: Ctx, on_event: EventSink | None = N
                             },
                         )
                     )
-                # === HITL 인터럽트: 승인 대기 알림 ===
-                if on_event:
+                    # 1) 얕은 체크포인트 먼저 방출 (클라가 저장 후 대기 진입)
                     on_event(
                         _ev(
                             "OBS",
                             "hitl",
-                            "승인 대기(HITL_WAIT)",
-                            {"hint": "POST /runs/{id}/continue approve=true|false"},
+                            "STATE_CHECKPOINT",
+                            {
+                                "state": {
+                                    "merged_path": state.get("merged_path"),
+                                    "validation_report": vr,
+                                }
+                            },
                         )
                     )
-                # SSE 루프가 WAITING_HITL 전이하도록 트리거
-                if on_event:
+                    # 2) 그 다음 HITL 신호
                     on_event(_ev("OBS", "hitl", "HITL_SIGNAL", {"state": "WAITING"}))
+                delta = {"validation_report": vr}
 
             elif ntype == "export_xlsx":
-                out = node_export_xlsx(
-                    cfg, {"merge_xlsx.merged_table": state.get("merged_path")}, ctx
-                )
-                state["artifact_id"] = out.get("artifact_id")
+                # LG 내부에선 실제 내보내기를 건너뜀 (HITL 승인 후 main에서 실행)
                 if on_event:
                     on_event(
                         _ev(
                             "OBS",
                             nid,
-                            "산출물 경로",
-                            {"artifact_id": state["artifact_id"]},
+                            "EXPORT_DEFERRED",
+                            {"hint": "HITL 승인 후 서버가 export_xlsx 수행"},
                         )
                     )
+                delta = {}  # 변경 없음
 
             else:
                 raise RuntimeError(f"unsupported node: {ntype}")
 
             if on_event:
-                keys = list(out.keys()) if isinstance(out, dict) else []
+                keys = list(delta.keys())
                 on_event(_ev("SUMMARY", nid, f"{nid} 완료", {"keys": keys}))
-
-            return state
+            return delta  # ✅ delta만 반환 (전체 state 금지)
 
         g.add_node(nid, run)
 
-    # 노드/엣지 연결
-    for n in wf["nodes"]:
+    # 노드/엣지 등록
+    for n in wf.get("nodes", []):
         add(n["id"])
     for e in edges:
         g.add_edge(e["from"], e["to"])
 
-    # 시작/종료
-    if wf["nodes"]:
+    # 시작/종료 지정
+    if wf.get("nodes"):
         g.set_entry_point(wf["nodes"][0]["id"])
         g.set_finish_point(wf["nodes"][-1]["id"])
 
@@ -186,15 +181,16 @@ def build_langgraph(wf: Dict[str, Any], ctx: Ctx, on_event: EventSink | None = N
 
 def execute_stream_lg(wf: Dict[str, Any], ctx: Ctx):
     """
-    1차 실행(검증까지) 후 HITL 신호를 내보내고 종료.
-    - LangGraph invoke 시 반드시 thread_id를 넘긴다.
-    - 이어서 재개는 외부(SSE 루프)에서 처리.
+    LangGraph 실행 → 이벤트 순차 방출.
+    - PLAN 선방출
+    - MemorySaver가 요구하는 thread_id를 config로 지정
     """
     events: List[Dict[str, Any]] = []
 
     def sink(ev: Dict[str, Any]):
         events.append(ev)
 
+    # 계획 이벤트
     sink(
         _ev(
             "PLAN",
@@ -203,19 +199,16 @@ def execute_stream_lg(wf: Dict[str, Any], ctx: Ctx):
             {"nodes": len(wf.get("nodes", []))},
         )
     )
+
     app = build_langgraph(wf, ctx, on_event=sink)
 
-    # ✅ thread_id 제공 (필수)
-    state = app.invoke({}, config={"configurable": {"thread_id": ctx.run_id}})
+    # thread_id 필수
+    final_state: LGState = app.invoke(
+        {}, config={"configurable": {"thread_id": ctx.run_id}}
+    )  # type: ignore
 
-    # 수집된 이벤트를 순차 방출
+    # (여기서는 추가 STATE_CHECKPOINT 불필요 — validate 시점에서 이미 방출)
+
+    # 순서대로 방출
     for ev in events:
         yield ev
-
-    # 상태 체크포인트를 알림(재개용)
-    yield {
-        "type": "OBS",
-        "nodeId": "hitl",
-        "message": "STATE_CHECKPOINT",
-        "detail": {"state": state},
-    }

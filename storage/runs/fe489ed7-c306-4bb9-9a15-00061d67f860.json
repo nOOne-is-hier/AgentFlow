@@ -1,8 +1,8 @@
 {
-  "runId": "bc3cd82f-d3ca-432c-8bc4-c93cb3df149c",
+  "runId": "fe489ed7-c306-4bb9-9a15-00061d67f860",
   "status": "SUCCEEDED",
   "workflow": {
-    "id": "wf-dd63ccae",
+    "id": "wf-cb4c978c",
     "name": "Budget-Validation",
     "nodes": [
       {
@@ -133,13 +133,21 @@
       {
         "from": "validate",
         "to": "export"
+      },
+      {
+        "from": "parse_pdf",
+        "to": "merge_xlsx"
+      },
+      {
+        "from": "embed_pdf",
+        "to": "validate"
       }
     ],
-    "createdAt": "2025-10-22T06:27:01.393997+00:00",
-    "updatedAt": "2025-10-22T06:27:01.394997+00:00"
+    "createdAt": "2025-10-22T06:54:55.711298+00:00",
+    "updatedAt": "2025-10-22T06:54:55.711298+00:00"
   },
-  "startedAt": "2025-10-22T06:27:12.800139+00:00",
-  "endedAt": "2025-10-22T06:27:33.476121+00:00",
-  "artifactId": null,
+  "startedAt": "2025-10-22T06:55:17.559462+00:00",
+  "endedAt": "2025-10-22T07:03:05.292331+00:00",
+  "artifactId": "art-fe489ed7",
   "checkpoint": null
 }

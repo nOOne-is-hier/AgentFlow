@@ -19,7 +19,8 @@ from .settings import (
     FILES_INDEX,
 )
 from .models import Workflow, GraphPatch
-from .engine import execute_stream, Ctx, now_iso
+from .engine import execute_stream, Ctx, now_iso, node_export_xlsx
+from .compact import compact_event
 from .engine_lg import execute_stream_lg
 from .assistant_reply import generate_assistant_reply
 
@@ -87,6 +88,242 @@ def _select_latest_pdf() -> Optional[Dict[str, Any]]:
     idx = _load_json(FILES_INDEX, {"files": []})
     pdfs = [f for f in idx.get("files", []) if f.get("type") == "pdf"]
     return max(pdfs, key=lambda x: _parse_dt(x.get("uploadedAt", "")), default=None)
+
+
+def _autopatch_edges(wf: dict) -> dict:
+    """노드 간 필수 엣지가 빠졌을 때 PoC용으로 자동 보강."""
+    nodes = {n["id"]: n for n in wf.get("nodes", [])}
+    edges = list(wf.get("edges", []))
+
+    def _has(frm, to):
+        return any(e.get("from") == frm and e.get("to") == to for e in edges)
+
+    if (
+        "parse_pdf" in nodes
+        and "merge_xlsx" in nodes
+        and not _has("parse_pdf", "merge_xlsx")
+    ):
+        edges.append({"from": "parse_pdf", "to": "merge_xlsx"})
+    if (
+        "embed_pdf" in nodes
+        and "validate" in nodes
+        and not _has("embed_pdf", "validate")
+    ):
+        edges.append({"from": "embed_pdf", "to": "validate"})
+
+    wf["edges"] = edges
+    return wf
+
+
+def _assistant_reply(run: dict, events: list[dict], validation: dict | None) -> str:
+    """
+    답장 스위치:
+      - OPENAI_API_KEY 존재 & openai 모듈 사용 가능 → OpenAI로 요약 생성
+      - 아니면 서버 내장 요약으로 fallback
+    """
+    import os
+
+    # --- 공통 컨텍스트 추출(프롬프트/폴백에서 공용) ---
+    run_id = run.get("runId")
+    status = run.get("status")
+    artifact_id = run.get("artifactId")
+
+    # PLAN 요약
+    plan_ev = next((e for e in events if e.get("type") == "PLAN"), None)
+    planned_nodes = (plan_ev or {}).get("detail", {}).get("nodes")
+
+    # 노드 완료 여부/세부 OBS 집계
+    obs_by_node: dict[str, dict] = {}
+    for ev in events:
+        if ev.get("type") == "OBS" and ev.get("nodeId"):
+            obs_by_node.setdefault(ev["nodeId"], {})
+            # 같은 키를 덮어쓰되, 마지막 OBS의 detail을 남김
+            if isinstance(ev.get("detail"), dict):
+                obs_by_node[ev["nodeId"]].update(ev["detail"])
+
+    # validation summary & 샘플 evidence 3개 이내
+    v_sum = {}
+    v_items_sample = []
+    if isinstance(validation, dict):
+        v_sum = validation.get("summary", {}) or {}
+        items = validation.get("items", []) or []
+        # 너무 길지 않게 앞쪽 샘플 일부만 포함
+        for it in items[:3]:
+            v_items_sample.append(
+                {
+                    "policy": it.get("policy"),
+                    "dept": it.get("dept"),
+                    "status": it.get("status"),
+                    # 증거는 페이지/짧은 스니펫만 슬라이스
+                    "evidence": [
+                        {
+                            "page": e.get("page"),
+                            "snippet": (e.get("snippet") or "")[:120],
+                        }
+                        for e in (it.get("evidence") or [])[:1]
+                    ],
+                }
+            )
+
+    # 마지막 export 관찰에서 artifact_id 보강
+    if not artifact_id:
+        exp_obs = next(
+            (
+                e
+                for e in reversed(events)
+                if e.get("nodeId") == "export" and e.get("type") == "OBS"
+            ),
+            None,
+        )
+        if exp_obs and isinstance(exp_obs.get("detail"), dict):
+            artifact_id = exp_obs["detail"].get("artifact_id", artifact_id)
+
+    # -------- OpenAI 경로 시도 --------
+    key = os.getenv("OPENAI_API_KEY", "").strip()
+    if key:
+        # 프롬프트용 컨텍스트(간결)
+        context_lines = []
+        context_lines.append(f"run_id: {run_id}")
+        context_lines.append(f"status: {status}")
+        if planned_nodes is not None:
+            context_lines.append(f"planned_nodes: {planned_nodes}")
+        # 핵심 OBS 요약
+        pp = obs_by_node.get("parse_pdf", {})
+        em = obs_by_node.get("embed_pdf", {})
+        mg = obs_by_node.get("merge_xlsx", {})
+        vd = obs_by_node.get("validate", {})
+        context_lines.append(
+            f"parse_pdf: chunks={pp.get('chunks')} pages={pp.get('pages')}"
+        )
+        context_lines.append(f"embed_pdf: count={em.get('count')}")
+        context_lines.append(f"merge_xlsx: rows={mg.get('rows')}")
+        # 검증 합계
+        if v_sum:
+            context_lines.append(
+                f"validation_summary: ok={v_sum.get('ok',0)} warn={v_sum.get('warn',0)} fail={v_sum.get('fail',0)}"
+            )
+        # 샘플 evidence
+        if v_items_sample:
+            context_lines.append("validation_examples:")
+            for it in v_items_sample:
+                ev = (it.get("evidence") or [{}])[0]
+                context_lines.append(
+                    f"- {it.get('policy')} | dept={it.get('dept')} | status={it.get('status')} | page={ev.get('page')} | snippet={ev.get('snippet')}"
+                )
+        # 산출물
+        if artifact_id:
+            context_lines.append(f"artifact_id: {artifact_id}")
+
+        system_msg = (
+            "당신은 데이터 파이프라인 시연 어시스턴트입니다. "
+            "사용자에게 '무엇을 했고(PLAN/ACTION), 어떻게 했고(근거/스니펫/페이지), 결과가 어떠한지'를 "
+            "간결한 한국어로 설명하세요. 내부 추론(ToT)은 노출하지 말고 요약만 제시합니다. "
+            "항상 항목형 요약(불릿)을 사용하고, 과장 없이 사실만 기술하세요. 최대 2200자."
+        )
+        user_msg = (
+            "다음 실행 컨텍스트를 바탕으로, 시연용 응답을 작성하세요.\n"
+            "요구사항:\n"
+            "1) 실행 요약(실행 ID, 상태, 계획된 노드 수)\n"
+            "2) 단계 요약(parse_pdf, embed_pdf, merge_xlsx, validate, export) — 각 단계 핵심 수치 포함\n"
+            "3) 검증 결과 요약 및 예시 1~3건(부서/정책/페이지/스니펫)\n"
+            "4) 산출물(artifact_id) 표시\n"
+            "5) 공손하고 간결하게.\n"
+            "\n=== 실행 컨텍스트 ===\n" + "\n".join(context_lines)
+        )
+
+        # v1 SDK 우선 → 실패 시 구버전 fallback → 그래도 실패면 내장 요약
+        model = os.getenv("OPENAI_ASSIST_MODEL", "gpt-4o-mini")
+        try:
+            try:
+                from openai import OpenAI  # v1 SDK
+
+                client = OpenAI(api_key=key)
+                resp = client.chat.completions.create(
+                    model=model,
+                    temperature=0.2,
+                    messages=[
+                        {"role": "system", "content": system_msg},
+                        {"role": "user", "content": user_msg},
+                    ],
+                )
+                text = (resp.choices[0].message.content or "").strip()
+                if text:
+                    return text
+            except Exception:
+                # 구버전 SDK 호환
+                import openai  # type: ignore
+
+                openai.api_key = key
+                resp = openai.ChatCompletion.create(
+                    model=model,
+                    temperature=0.2,
+                    messages=[
+                        {"role": "system", "content": system_msg},
+                        {"role": "user", "content": user_msg},
+                    ],
+                )
+                text = (resp.choices[0].message["content"] or "").strip()
+                if text:
+                    return text
+        except Exception:
+            # OpenAI 호출 실패 → 폴백으로 진행
+            pass
+
+    # -------- 폴백(서버 내장 요약) --------
+    lines: list[str] = []
+    lines.append("## 실행 요약")
+    lines.append(f"- 실행 ID: {run_id}")
+    lines.append(f"- 상태: {status}")
+    if planned_nodes is not None:
+        lines.append(f"- 계획된 노드 수: {planned_nodes}")
+
+    # 단계 요약
+    def _done(nid: str) -> bool:
+        return any(
+            e.get("nodeId") == nid and e.get("type") == "SUMMARY" for e in events
+        )
+
+    lines.append("")
+    lines.append("### 단계 진행")
+    lines.append(
+        f"- parse_pdf: 완료 (chunks={obs_by_node.get('parse_pdf',{}).get('chunks')}, pages={obs_by_node.get('parse_pdf',{}).get('pages')})"
+        if _done("parse_pdf")
+        else "- parse_pdf: -"
+    )
+    lines.append(
+        f"- embed_pdf: 완료 (count={obs_by_node.get('embed_pdf',{}).get('count')})"
+        if _done("embed_pdf")
+        else "- embed_pdf: -"
+    )
+    lines.append(
+        f"- merge_xlsx: 완료 (rows={obs_by_node.get('merge_xlsx',{}).get('rows')})"
+        if _done("merge_xlsx")
+        else "- merge_xlsx: -"
+    )
+    if v_sum:
+        lines.append(
+            f"- validate: 완료 (ok={v_sum.get('ok',0)}, warn={v_sum.get('warn',0)}, fail={v_sum.get('fail',0)})"
+        )
+    else:
+        lines.append("- validate: 완료")
+
+    # 검증 예시
+    if v_items_sample:
+        lines.append("")
+        lines.append("### 검증 예시")
+        for it in v_items_sample:
+            ev = (it.get("evidence") or [{}])[0]
+            lines.append(
+                f"- [{it.get('policy')}] {it.get('dept')} — {it.get('status')} (p.{ev.get('page')}) {ev.get('snippet')}"
+            )
+
+    # 산출물
+    if artifact_id:
+        lines.append("")
+        lines.append(f"### 산출물")
+        lines.append(f"- artifact_id: {artifact_id}")
+
+    return "\n".join(lines)
 
 
 # ---------- Schemas ----------
@@ -355,9 +592,9 @@ async def run_events(run_id: str, request: Request):
     if not os.path.exists(rpath):
         raise HTTPException(404, "run not found")
     run = _load_json(rpath, {})
-    wf = run.get("workflow")
+    wf = run.get("workflow") or {}
+    wf = _autopatch_edges(wf)
 
-    # LangGraph 기본 사용
     use_lg = (
         True
         if request.query_params.get("engine", "lg").lower() == "lg"
@@ -367,26 +604,26 @@ async def run_events(run_id: str, request: Request):
 
     async def gen():
         seq = 1
-        buffer_events: List[Dict[str, Any]] = []  # 어시스턴트 요약용
-        validation: Dict[str, Any] | None = None
+        buffer_events: List[Dict[str, Any]] = []
         checkpoint_state: Dict[str, Any] | None = None
 
-        def pack(ev: Dict[str, Any]):
+        def send(ev: Dict[str, Any]):
             nonlocal seq
             ev.setdefault("seq", seq)
             seq += 1
-            buffer_events.append(ev)
-            data = json.dumps(ev, ensure_ascii=False)
+            # === 압축/요약 적용 ===
+            cev = compact_event(ev)
+            buffer_events.append(cev)
+            data = json.dumps(cev, ensure_ascii=False)
             return f"id: {seq}\nevent: message\ndata: {data}\n\n".encode("utf-8")
 
-        # RUNNING 전이
+        # RUNNING
         run["status"] = "RUNNING"
         _save_json(rpath, run)
 
         ctx = Ctx(run_id=run_id, storage=STORAGE, art_dir=ART_DIR)
 
         try:
-            # === 1차 실행 (LG: validate까지 진행 & HITL_SIGNAL 방출) ===
             stream = execute_stream_lg(wf, ctx) if use_lg else execute_stream(wf, ctx)
 
             async def stream_iter():
@@ -395,11 +632,11 @@ async def run_events(run_id: str, request: Request):
                     await asyncio.sleep(0)
 
             async for ev in stream_iter():
-                # HITL 신호 수신 → WAITING_HITL 전이 및 대기
+                # HITL 진입
                 if ev.get("nodeId") == "hitl" and ev.get("message") == "HITL_SIGNAL":
                     run["status"] = "WAITING_HITL"
                     _save_json(rpath, run)
-                    yield pack(
+                    yield send(
                         {
                             "type": "OBS",
                             "nodeId": "hitl",
@@ -407,110 +644,81 @@ async def run_events(run_id: str, request: Request):
                             "detail": {},
                         }
                     )
-
-                    # 승인 대기 루프
+                    # 승인 대기
                     while True:
-                        await asyncio.sleep(0.6)
+                        await asyncio.sleep(0.5)
                         cur = _load_json(rpath, {})
                         if cur.get("status") in ("RUNNING", "CANCELLED"):
                             break
-
-                    # 거부 시 종료
                     if _load_json(rpath, {}).get("status") == "CANCELLED":
-                        yield pack(
+                        yield send(
                             {
                                 "type": "SUMMARY",
                                 "nodeId": "hitl",
                                 "message": "사용자 거부로 취소",
+                                "detail": {},
                             }
                         )
                         run["status"] = "CANCELLED"
                         run["endedAt"] = now_iso()
                         _save_json(rpath, run)
                         return
-
-                    # 승인됨
-                    yield pack(
-                        {
-                            "type": "OBS",
-                            "nodeId": "hitl",
-                            "message": "APPROVED",
-                            "detail": {},
-                        }
+                    # 승인됨 → export 수행
+                    export_node = next(
+                        (
+                            n
+                            for n in wf.get("nodes", [])
+                            if n.get("type") == "export_xlsx"
+                        ),
+                        None,
                     )
+                    if export_node:
+                        yield send(
+                            {
+                                "type": "ACTION",
+                                "nodeId": "export",
+                                "message": "export_xlsx 시작",
+                                "detail": {},
+                            }
+                        )
+                        out = node_export_xlsx(
+                            export_node.get("config", {}),
+                            {
+                                "merge_xlsx.merged_table": (checkpoint_state or {}).get(
+                                    "merged_path"
+                                )
+                            },
+                            ctx,
+                        )
+                        yield send(
+                            {
+                                "type": "OBS",
+                                "nodeId": "export",
+                                "message": "산출물 생성",
+                                "detail": {"artifact_id": out.get("artifact_id")},
+                            }
+                        )
+                        yield send(
+                            {
+                                "type": "SUMMARY",
+                                "nodeId": "export",
+                                "message": "export_xlsx 완료",
+                                "detail": {"keys": list(out.keys())},
+                            }
+                        )
+                    continue
 
-                    # === 승인 후 마무리(export 실행) ===
-                    # LG 체크포인트 상태에서 merged_path / export 설정 가져오기
-                    if use_lg and checkpoint_state:
-                        try:
-                            # export 노드 spec 찾기
-                            export_node = next(
-                                n
-                                for n in wf.get("nodes", [])
-                                if n.get("type") == "export_xlsx"
-                            )
-                            cfg = export_node.get("config", {}) or {}
-                            from .engine import node_export_xlsx  # 함수 사용
-
-                            out = node_export_xlsx(
-                                cfg,
-                                {
-                                    "merge_xlsx.merged_table": checkpoint_state.get(
-                                        "merged_path"
-                                    )
-                                },
-                                ctx,
-                            )
-                            yield pack(
-                                {
-                                    "type": "ACTION",
-                                    "nodeId": "export",
-                                    "message": "export_xlsx 시작",
-                                    "detail": {},
-                                }
-                            )
-                            yield pack(
-                                {
-                                    "type": "OBS",
-                                    "nodeId": "export",
-                                    "message": "산출물 경로",
-                                    "detail": {"artifact_id": out.get("artifact_id")},
-                                }
-                            )
-                            yield pack(
-                                {
-                                    "type": "SUMMARY",
-                                    "nodeId": "export",
-                                    "message": "export_xlsx 완료",
-                                    "detail": {"keys": list(out.keys())},
-                                }
-                            )
-                        except StopIteration:
-                            # export 노드가 없으면 패스
-                            pass
-
-                elif ev.get("nodeId") == "validate" and ev.get("type") in (
-                    "OBS",
-                    "SUMMARY",
-                ):
-                    # 검증 요약 저장(어시스턴트 답장용)
-                    # 자세한 report는 LG state에서 넘겨받음
-                    pass
-
-                elif (
+                if (
                     ev.get("nodeId") == "hitl"
                     and ev.get("message") == "STATE_CHECKPOINT"
                 ):
                     checkpoint_state = ev.get("detail", {}).get("state")
 
-                # 이벤트 송신
-                yield pack(ev)
+                yield send(ev)
 
-            # === 완료 처리 ===
+            # 완료
             run["status"] = "SUCCEEDED"
             run["endedAt"] = now_iso()
-
-            # artifactId best-effort
             art_id = None
             for fn in os.listdir(ART_DIR):
                 if fn.endswith(".xlsx") and run_id[:8] in fn:
@@ -519,15 +727,11 @@ async def run_events(run_id: str, request: Request):
             run["artifactId"] = art_id
             _save_json(rpath, run)
 
-            # 어시스턴트 답장(OpenAI Chat)
-            # 검증 내용은 체크포인트 state에서 전달
-            validation = (
-                (checkpoint_state or {}).get("validation_report", {})
-                if checkpoint_state
-                else {}
+            # 어시스턴트 요약(사실 기반)
+            reply = _assistant_reply(
+                run, buffer_events, (checkpoint_state or {}).get("validation_report")
             )
-            reply = generate_assistant_reply(run, buffer_events, validation or {})
-            yield pack(
+            yield send(
                 {
                     "type": "SUMMARY",
                     "nodeId": "assistant",
@@ -540,8 +744,13 @@ async def run_events(run_id: str, request: Request):
             run["status"] = "FAILED"
             run["endedAt"] = now_iso()
             _save_json(rpath, run)
-            yield pack(
-                {"type": "SUMMARY", "nodeId": "runtime", "message": f"실패: {e}"}
+            yield send(
+                {
+                    "type": "SUMMARY",
+                    "nodeId": "runtime",
+                    "message": f"실패: {e}",
+                    "detail": {},
+                }
             )
 
     headers = {
