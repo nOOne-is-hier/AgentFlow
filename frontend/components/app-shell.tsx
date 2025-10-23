@@ -87,9 +87,7 @@ export function AppShell({
               <Menu className="h-5 w-5" />
             )}
           </Button>
-          <h1 className="text-lg font-bold sk-gradient-text">
-            Budget Validation System
-          </h1>
+          <h1 className="text-lg font-bold sk-gradient-text">AgentFlow</h1>
         </div>
 
         <div className="flex-1" />

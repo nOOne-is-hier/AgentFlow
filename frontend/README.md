@@ -1,6 +1,6 @@
-# Budget Validation System - Frontend
+# AgentFlow - Frontend
 
-SK CI 예산 검증 자동화 시스템의 프론트엔드 애플리케이션입니다.
+AgentFlow는 기업형 자동화 파이프라인의 언어 인터페이스입니다.
 
 ## 기술 스택
 
