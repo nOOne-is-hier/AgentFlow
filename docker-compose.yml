@@ -1,0 +1,39 @@
+version: "3.9"
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    env_file:
+      - .env                    # OPENAI_API_KEY 등
+    environment:
+      TZ: Asia/Seoul
+      PYTHONUNBUFFERED: "1"
+    working_dir: /app           # settings.py가 ROOT를 cwd로 사용
+    command: >
+      uvicorn backend.app:app
+      --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./storage:/app/storage  # 결과/업로드/런/아티팩트
+      - ./chroma:/app/chroma    # Chroma PersistentClient 경로
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+      args:
+        # 빌드타임에 주입 (client 번들에 고정됨)
+        NEXT_PUBLIC_API_BASE_URL: "http://localhost:8000"
+    # 런타임에도(서버컴포넌트에서) 접근 가능하도록 한번 더 노출
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: "http://localhost:8000"
+      NODE_ENV: production
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    restart: unless-stopped

@@ -1,0 +1,28 @@
+# ---- Frontend (Next.js / Node 22.20.0) ----
+FROM node:22.20.0-alpine AS builder
+WORKDIR /app
+
+# 의존성 설치
+COPY frontend/package*.json ./
+RUN npm ci
+
+# 소스 복사 및 환경변수(빌드타임) 주입
+COPY frontend/ ./
+ARG NEXT_PUBLIC_API_BASE_URL
+ENV NEXT_PUBLIC_API_BASE_URL=${NEXT_PUBLIC_API_BASE_URL}
+
+# 프로덕션 빌드
+RUN npm run build
+
+# ---- Runtime ----
+FROM node:22.20.0-alpine AS runner
+WORKDIR /app
+ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
+
+# 빌드 산출물 + 필요 파일만 복사(간단히 전체 복사)
+COPY --from=builder /app /app
+
+EXPOSE 3000
+# package.json에 start가 없어도 동작 보장
+CMD ["npx", "next", "start", "-p", "3000"]
