@@ -611,18 +611,18 @@ async def run_events(run_id: str, request: Request):
         seq = 1
         buffer_events: List[Dict[str, Any]] = []
         checkpoint_state: Dict[str, Any] | None = None
+        stream_active = True
 
-        def send(ev: Dict[str, Any]):
+        def send(ev: Dict[str, Any], has_more: bool = True):
             nonlocal seq
             ev.setdefault("seq", seq)
             seq += 1
-            # === 압축/요약 적용 ===
+            ev["has_more"] = has_more
             cev = compact_event(ev)
             buffer_events.append(cev)
             data = json.dumps(cev, ensure_ascii=False)
             return f"id: {seq}\nevent: message\ndata: {data}\n\n".encode("utf-8")
 
-        # RUNNING
         run["status"] = "RUNNING"
         _save_json(rpath, run)
 
@@ -634,10 +634,9 @@ async def run_events(run_id: str, request: Request):
             async def stream_iter():
                 for ev in stream:
                     yield ev
-                    await asyncio.sleep(0)
+                    await asyncio.sleep(0.8)
 
             async for ev in stream_iter():
-                # HITL 진입
                 if ev.get("nodeId") == "hitl" and ev.get("message") == "HITL_SIGNAL":
                     run["status"] = "WAITING_HITL"
                     _save_json(rpath, run)
@@ -647,9 +646,9 @@ async def run_events(run_id: str, request: Request):
                             "nodeId": "hitl",
                             "message": "WAITING_HITL",
                             "detail": {},
-                        }
+                        },
+                        has_more=True,
                     )
-                    # 승인 대기
                     while True:
                         await asyncio.sleep(0.5)
                         cur = _load_json(rpath, {})
@@ -662,13 +661,14 @@ async def run_events(run_id: str, request: Request):
                                 "nodeId": "hitl",
                                 "message": "사용자 거부로 취소",
                                 "detail": {},
-                            }
+                            },
+                            has_more=False,
                         )
                         run["status"] = "CANCELLED"
                         run["endedAt"] = now_iso()
                         _save_json(rpath, run)
+                        stream_active = False
                         return
-                    # 승인됨 → export 수행
                     export_node = next(
                         (
                             n
@@ -684,7 +684,8 @@ async def run_events(run_id: str, request: Request):
                                 "nodeId": "export",
                                 "message": "export_xlsx 시작",
                                 "detail": {},
-                            }
+                            },
+                            has_more=True,
                         )
                         out = node_export_xlsx(
                             export_node.get("config", {}),
@@ -701,7 +702,8 @@ async def run_events(run_id: str, request: Request):
                                 "nodeId": "export",
                                 "message": "산출물 생성",
                                 "detail": {"artifact_id": out.get("artifact_id")},
-                            }
+                            },
+                            has_more=True,
                         )
                         yield send(
                             {
@@ -709,7 +711,8 @@ async def run_events(run_id: str, request: Request):
                                 "nodeId": "export",
                                 "message": "export_xlsx 완료",
                                 "detail": {"keys": list(out.keys())},
-                            }
+                            },
+                            has_more=True,
                         )
                     continue
 
@@ -719,9 +722,8 @@ async def run_events(run_id: str, request: Request):
                 ):
                     checkpoint_state = ev.get("detail", {}).get("state")
 
-                yield send(ev)
+                yield send(ev, has_more=True)
 
-            # 완료
             run["status"] = "SUCCEEDED"
             run["endedAt"] = now_iso()
             art_id = None
@@ -732,7 +734,6 @@ async def run_events(run_id: str, request: Request):
             run["artifactId"] = art_id
             _save_json(rpath, run)
 
-            # 어시스턴트 요약(사실 기반)
             reply = _assistant_reply(
                 run, buffer_events, (checkpoint_state or {}).get("validation_report")
             )
@@ -742,8 +743,10 @@ async def run_events(run_id: str, request: Request):
                     "nodeId": "assistant",
                     "message": "ASSISTANT_REPLY",
                     "detail": {"text": reply},
-                }
+                },
+                has_more=False,
             )
+            stream_active = False
 
         except Exception as e:
             run["status"] = "FAILED"
@@ -755,8 +758,10 @@ async def run_events(run_id: str, request: Request):
                     "nodeId": "runtime",
                     "message": f"실패: {e}",
                     "detail": {},
-                }
+                },
+                has_more=False,
             )
+            stream_active = False
 
     headers = {
         "Content-Type": "text/event-stream",

@@ -55,6 +55,16 @@ const EVENT_CONFIG = {
     color: "ev-assistant",
     label: "어시스턴트",
   },
+  USER: {
+    icon: MessageSquare,
+    color: "ev-user",
+    label: "사용자",
+  },
+  ASSISTANT: {
+    icon: MessageSquare,
+    color: "ev-assistant",
+    label: "어시스턴트",
+  },
   ERROR: {
     icon: AlertCircle,
     color: "destructive",
@@ -203,6 +213,28 @@ export function EventCard({ event, className, artifactId }: EventCardProps) {
       return null;
     }
 
+    if (
+      (event.event === "USER" || event.event === "ASSISTANT") &&
+      event.data.text
+    ) {
+      return (
+        <div className="prose prose-sm max-w-none dark:prose-invert">
+          <ReactMarkdown>{event.data.text}</ReactMarkdown>
+        </div>
+      );
+    }
+
+    if (event.event === "PLAN" && event.data.detail?.text) {
+      return (
+        <div className="space-y-2">
+          <p className="text-sm font-medium">{event.data.message}</p>
+          <div className="text-sm text-muted-foreground whitespace-pre-wrap">
+            {event.data.detail.text}
+          </div>
+        </div>
+      );
+    }
+
     if (event.event === "ASSISTANT_REPLY" && event.data.text) {
       // Check if this is a summary event (contains markdown formatting)
       if (event.data.text.includes("##") || event.data.text.length > 200) {
@@ -229,6 +261,17 @@ export function EventCard({ event, className, artifactId }: EventCardProps) {
 
     if (event.data.message) {
       return <p className="text-sm">{event.data.message}</p>;
+    }
+
+    if (event.event === "OBS" && event.data.detail?.text) {
+      return (
+        <div className="space-y-2">
+          <p className="text-sm font-medium">{event.data.message}</p>
+          <div className="text-sm text-muted-foreground whitespace-pre-wrap">
+            {event.data.detail.text}
+          </div>
+        </div>
+      );
     }
 
     if (event.data.detail && typeof event.data.detail === "object") {

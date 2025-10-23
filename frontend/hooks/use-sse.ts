@@ -78,6 +78,7 @@ export function useSSE(url: string | null, options: UseSSEOptions = {}) {
               text: rawData.detail?.text,
             },
             timestamp: rawData.ts || new Date().toISOString(),
+            has_more: rawData.has_more,
           }
 
           if (event.event === "SUMMARY") {

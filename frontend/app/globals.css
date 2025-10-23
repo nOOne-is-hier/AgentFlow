@@ -46,6 +46,7 @@
   --color-sk-red-dark: #c40023;
   --color-sk-orange-dark: #e6a300;
 
+  /* Added ev-user color for user messages */
   /* Event Type Colors */
   --color-ev-plan: #3b82f6;
   --color-ev-action: #8b5cf6;
@@ -53,6 +54,7 @@
   --color-ev-summary: #f59e0b;
   --color-ev-hitl: #ef4444;
   --color-ev-assistant: #ec4899;
+  --color-ev-user: #6366f1;
 }
 
 .dark {
@@ -134,6 +136,7 @@
   --color-sk-red-dark: #c40023;
   --color-sk-orange-dark: #e6a300;
 
+  /* Added ev-user color to theme */
   /* Event Type Colors */
   --color-ev-plan: #3b82f6;
   --color-ev-action: #8b5cf6;
@@ -141,6 +144,7 @@
   --color-ev-summary: #f59e0b;
   --color-ev-hitl: #ef4444;
   --color-ev-assistant: #ec4899;
+  --color-ev-user: #6366f1;
 }
 
 @layer base {

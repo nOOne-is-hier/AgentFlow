@@ -1,6 +1,6 @@
-"use client"
+"use client";
 
-import { useEffect } from "react"
+import { useEffect, memo, useMemo } from "react";
 import ReactFlow, {
   Background,
   Controls,
@@ -10,15 +10,16 @@ import ReactFlow, {
   useNodesState,
   useEdgesState,
   MarkerType,
+  Handle,
   Position,
-} from "reactflow"
-import "reactflow/dist/style.css"
-import type { Workflow } from "@/types"
-import { cn } from "@/lib/utils"
+} from "reactflow";
+import "reactflow/dist/style.css";
+import type { Workflow } from "@/types";
+import { cn } from "@/lib/utils";
 
 interface GraphCanvasProps {
-  workflow?: Workflow | null
-  className?: string
+  workflow?: Workflow | null;
+  className?: string;
 }
 
 const NODE_TYPES_CONFIG = {
@@ -47,14 +48,16 @@ const NODE_TYPES_CONFIG = {
     color: "bg-sk-red",
     textColor: "text-white",
   },
-}
+};
 
-function CustomNode({ data }: { data: any }) {
-  const config = NODE_TYPES_CONFIG[data.type as keyof typeof NODE_TYPES_CONFIG] || {
+const CustomNode = memo(function CustomNode({ data }: { data: any }) {
+  const config = NODE_TYPES_CONFIG[
+    data.type as keyof typeof NODE_TYPES_CONFIG
+  ] || {
     label: data.label,
     color: "bg-gray-500",
     textColor: "text-white",
-  }
+  };
 
   return (
     <div
@@ -62,33 +65,39 @@ function CustomNode({ data }: { data: any }) {
         "px-4 py-3 rounded-lg border-2 shadow-lg min-w-[150px]",
         config.color,
         config.textColor,
-        "border-white/20",
+        "border-white/20"
       )}
     >
+      <Handle type="target" position={Position.Left} />
       <div className="font-semibold text-sm">{config.label}</div>
-      {data.label && data.label !== config.label && <div className="text-xs opacity-80 mt-1">{data.label}</div>}
+      {data.label && data.label !== config.label && (
+        <div className="text-xs opacity-80 mt-1">{data.label}</div>
+      )}
+      <Handle type="source" position={Position.Right} />
     </div>
-  )
-}
+  );
+});
 
 const nodeTypes = {
   custom: CustomNode,
-}
+};
 
 export function GraphCanvas({ workflow, className }: GraphCanvasProps) {
-  const [nodes, setNodes, onNodesChange] = useNodesState([])
-  const [edges, setEdges, onEdgesChange] = useEdgesState([])
+  const [nodes, setNodes, onNodesChange] = useNodesState([]);
+  const [edges, setEdges, onEdgesChange] = useEdgesState([]);
+
+  const memoizedNodeTypes = useMemo(() => nodeTypes, []);
 
   useEffect(() => {
     if (!workflow) {
-      setNodes([])
-      setEdges([])
-      return
+      setNodes([]);
+      setEdges([]);
+      return;
     }
 
-    // Convert workflow nodes to React Flow nodes
     const flowNodes: Node[] = workflow.nodes.map((node, index) => {
-      const config = NODE_TYPES_CONFIG[node.type as keyof typeof NODE_TYPES_CONFIG]
+      const config =
+        NODE_TYPES_CONFIG[node.type as keyof typeof NODE_TYPES_CONFIG];
 
       return {
         id: node.id,
@@ -101,16 +110,15 @@ export function GraphCanvas({ workflow, className }: GraphCanvasProps) {
           label: node.label,
           type: node.type,
         },
-        sourcePosition: Position.Right,
-        targetPosition: Position.Left,
-      }
-    })
+      };
+    });
 
-    // Convert workflow edges to React Flow edges
-    const flowEdges: Edge[] = workflow.edges.map((edge) => ({
-      id: edge.id,
-      source: edge.source,
-      target: edge.target,
+    const flowEdges: Edge[] = workflow.edges.map((edge, index) => ({
+      id: `edge-${edge.from}-${edge.to}-${index}`,
+      source: edge.from,
+      target: edge.to,
+      sourceHandle: null,
+      targetHandle: null,
       type: "smoothstep",
       animated: true,
       style: { stroke: "#ea0029", strokeWidth: 2 },
@@ -118,21 +126,30 @@ export function GraphCanvas({ workflow, className }: GraphCanvasProps) {
         type: MarkerType.ArrowClosed,
         color: "#ea0029",
       },
-    }))
+    }));
 
-    setNodes(flowNodes)
-    setEdges(flowEdges)
-  }, [workflow, setNodes, setEdges])
+    setNodes(flowNodes);
+    setEdges(flowEdges);
+  }, [workflow, setNodes, setEdges]);
 
   if (!workflow) {
     return (
-      <div className={cn("flex h-full items-center justify-center bg-muted/20", className)}>
+      <div
+        className={cn(
+          "flex h-full items-center justify-center bg-muted/20",
+          className
+        )}
+      >
         <div className="text-center">
-          <h2 className="text-2xl font-bold text-muted-foreground mb-2">그래프 캔버스</h2>
-          <p className="text-sm text-muted-foreground">워크플로우를 생성하면 여기에 표시됩니다</p>
+          <h2 className="text-2xl font-bold text-muted-foreground mb-2">
+            그래프 캔버스
+          </h2>
+          <p className="text-sm text-muted-foreground">
+            워크플로우를 생성하면 여기에 표시됩니다
+          </p>
         </div>
       </div>
-    )
+    );
   }
 
   return (
@@ -142,7 +159,7 @@ export function GraphCanvas({ workflow, className }: GraphCanvasProps) {
         edges={edges}
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
-        nodeTypes={nodeTypes}
+        nodeTypes={memoizedNodeTypes}
         fitView
         attributionPosition="bottom-left"
       >
@@ -150,12 +167,15 @@ export function GraphCanvas({ workflow, className }: GraphCanvasProps) {
         <Controls />
         <MiniMap
           nodeColor={(node) => {
-            const config = NODE_TYPES_CONFIG[node.data.type as keyof typeof NODE_TYPES_CONFIG]
-            return config?.color.replace("bg-", "#") || "#6b7280"
+            const config =
+              NODE_TYPES_CONFIG[
+                node.data.type as keyof typeof NODE_TYPES_CONFIG
+              ];
+            return config?.color.replace("bg-", "#") || "#6b7280";
           }}
           maskColor="rgba(0, 0, 0, 0.1)"
         />
       </ReactFlow>
     </div>
-  )
+  );
 }

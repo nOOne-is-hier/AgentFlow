@@ -52,7 +52,16 @@ export interface Workflow {
 }
 
 // SSE Event Types
-export type EventType = "PLAN" | "ACTION" | "OBS" | "SUMMARY" | "ASSISTANT_REPLY" | "WAITING_HITL" | "ERROR"
+export type EventType =
+  | "PLAN"
+  | "ACTION"
+  | "OBS"
+  | "SUMMARY"
+  | "ASSISTANT_REPLY"
+  | "WAITING_HITL"
+  | "ERROR"
+  | "USER"
+  | "ASSISTANT"
 
 export interface SSEEvent {
   id: string
@@ -68,6 +77,7 @@ export interface SSEEvent {
     state?: any // For HITL checkpoint state
   }
   timestamp: string
+  has_more?: boolean
 }
 
 // Validation Types

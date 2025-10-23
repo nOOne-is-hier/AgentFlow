@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { EventCard } from "@/components/event-card";
+import { CardShimmer } from "@/components/card-shimmer";
 import { HITLApprovalBar } from "@/components/hitl-approval-bar";
 import { ValidationReportCard } from "@/components/validation-report";
 import { useSSE } from "@/hooks/use-sse";
@@ -21,6 +22,8 @@ interface ChatPanelProps {
   currentRunId?: string | null;
   onPipelineComplete?: () => void;
 }
+
+const CARD_RENDER_DELAY = 800; // ms
 
 export function ChatPanel({
   onWorkflowUpdate,
@@ -39,7 +42,12 @@ export function ChatPanel({
   const [isExecuting, setIsExecuting] = useState(false);
   const [pipelineCompleted, setPipelineCompleted] = useState(false);
   const [artifactId, setArtifactId] = useState<string | null>(null);
+  const [eventQueue, setEventQueue] = useState<SSEEvent[]>([]);
+  const [isProcessingQueue, setIsProcessingQueue] = useState(false);
+  const [pendingWorkflow, setPendingWorkflow] = useState<Workflow | null>(null);
+  const [expectingMoreEvents, setExpectingMoreEvents] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const processingTimeoutRef = useRef<NodeJS.Timeout>();
 
   const sseUrl = currentRunId ? api.getEventStream(currentRunId) : null;
 
@@ -47,10 +55,13 @@ export function ChatPanel({
     onEvent: (event) => {
       console.log("[v0] SSE Event received:", event);
 
+      if (event.has_more !== undefined) {
+        setExpectingMoreEvents(event.has_more);
+        console.log("[v0] Server signals more events:", event.has_more);
+      }
+
+      // Store validation report when received
       if (event.event === "OBS" && event.data?.node_id === "hitl") {
-        if (event.data?.message === "WAITING_HITL") {
-          setIsWaitingHITL(true);
-        }
         if (
           event.data?.message === "STATE_CHECKPOINT" &&
           event.data?.detail?.state?.validation_report
@@ -85,27 +96,143 @@ export function ChatPanel({
 
   useEffect(() => {
     if (sseEvents.length > 0) {
-      setMessages((prev) => {
-        const existingIds = new Set(prev.map((m) => m.id));
+      setEventQueue((prev) => {
+        const existingIds = new Set([
+          ...messages.map((m) => m.id),
+          ...prev.map((e) => e.id),
+        ]);
         const newEvents = sseEvents.filter((e) => !existingIds.has(e.id));
         return [...prev, ...newEvents];
       });
     }
-  }, [sseEvents]);
+  }, [sseEvents, messages]);
+
+  useEffect(() => {
+    // Check if the most recent message is a HITL event
+    const lastMessage = messages[messages.length - 1];
+    if (
+      lastMessage?.event === "OBS" &&
+      lastMessage.data?.node_id === "hitl" &&
+      lastMessage.data?.message === "WAITING_HITL"
+    ) {
+      setIsWaitingHITL(true);
+    }
+  }, [messages]);
+
+  useEffect(() => {
+    // Skip if queue is empty or already processing
+    if (eventQueue.length === 0 || isProcessingQueue) {
+      return;
+    }
+
+    const nextEvent = eventQueue[0];
+    if (nextEvent?.event === "ASSISTANT") {
+      console.log(
+        "[v0] ASSISTANT card is next in queue, shimmer should be visible"
+      );
+    }
+
+    console.log(
+      "[v0] Starting queue processing, queue length:",
+      eventQueue.length
+    );
+    setIsProcessingQueue(true);
+
+    // Process one item after delay
+    processingTimeoutRef.current = setTimeout(() => {
+      setEventQueue((currentQueue) => {
+        if (currentQueue.length === 0) {
+          console.log("[v0] Queue is empty, skipping processing");
+          return currentQueue;
+        }
+
+        const [nextEvent, ...remainingQueue] = currentQueue;
+        console.log(
+          "[v0] Processing event:",
+          nextEvent.event,
+          "Remaining:",
+          remainingQueue.length
+        );
+
+        if (nextEvent.event === "ASSISTANT") {
+          console.log(
+            "[v0] ASSISTANT card is now being rendered after shimmer delay"
+          );
+        }
+
+        setMessages((prev) => [...prev, nextEvent]);
+        return remainingQueue;
+      });
+
+      // Mark processing as complete
+      setIsProcessingQueue(false);
+    }, CARD_RENDER_DELAY);
+
+    // No cleanup function - let timeout complete naturally
+    // The isProcessingQueue flag prevents multiple timeouts
+  }, [eventQueue, isProcessingQueue]); // Depend on both queue length and processing state
 
   useEffect(() => {
     if (currentRunId) {
       setIsExecuting(true);
       setPipelineCompleted(false);
       setArtifactId(null);
+      setExpectingMoreEvents(true);
     }
   }, [currentRunId]);
 
   useEffect(() => {
     if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+      // Use requestAnimationFrame to ensure DOM has been updated
+      requestAnimationFrame(() => {
+        if (scrollRef.current) {
+          // Radix ScrollArea has a viewport element that's the actual scrollable container
+          const viewport = scrollRef.current.querySelector(
+            "[data-radix-scroll-area-viewport]"
+          ) as HTMLElement;
+          if (viewport) {
+            console.log(
+              "[v0] Scrolling viewport to bottom, scrollHeight:",
+              viewport.scrollHeight
+            );
+            viewport.scrollTo({
+              top: viewport.scrollHeight,
+              behavior: "smooth",
+            });
+          } else {
+            console.log("[v0] Viewport not found, trying direct scroll");
+            scrollRef.current.scrollTo({
+              top: scrollRef.current.scrollHeight,
+              behavior: "smooth",
+            });
+          }
+        }
+      });
     }
   }, [messages]);
+
+  useEffect(() => {
+    if (pendingWorkflow) {
+      const hasAssistantCard = messages.some(
+        (msg) => msg.event === "ASSISTANT"
+      );
+      if (hasAssistantCard) {
+        console.log("[v0] ASSISTANT card rendered, updating graph");
+        onWorkflowUpdate?.(pendingWorkflow);
+        setPendingWorkflow(null); // Clear pending workflow
+      }
+    }
+  }, [messages, pendingWorkflow, onWorkflowUpdate]);
+
+  useEffect(() => {
+    console.log("[v0] Shimmer state:", {
+      showShimmer,
+      queueLength: eventQueue.length,
+      isProcessing: isProcessingQueue,
+      pipelineCompleted,
+      nextEventType: eventQueue[0]?.event,
+    });
+  }, [eventQueue, isProcessingQueue, pipelineCompleted]); // Depend on both queue length and processing state
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -123,21 +250,48 @@ export function ChatPanel({
       },
       timestamp: new Date().toISOString(),
     };
-    setMessages((prev) => [...prev, userEvent]);
+    setEventQueue((prev) => [...prev, userEvent]);
 
     try {
       const response = await api.chatTurn({ message: userInput });
 
-      const assistantEvent: SSEEvent = {
+      const planningCards: SSEEvent[] = [];
+
+      // 1. Input understanding card
+      planningCards.push({
         id: (Date.now() + 1).toString(),
-        event: "ASSISTANT",
+        event: "PLAN",
         data: {
-          text: response.assistant,
+          type: "PLAN",
+          node_id: "system",
+          message: "입력 이해",
+          detail: {
+            text: `서버가 다음 요청을 받았습니다: "${userInput}"\n\n분석 중...`,
+          },
         },
         timestamp: new Date().toISOString(),
-      };
-      setMessages((prev) => [...prev, assistantEvent]);
+      });
 
+      // 2. Planning card (from tot)
+      if (response.tot && response.tot.steps) {
+        planningCards.push({
+          id: (Date.now() + 2).toString(),
+          event: "PLAN",
+          data: {
+            type: "PLAN",
+            node_id: "system",
+            message: "계획 수립",
+            detail: {
+              text: `다음 단계로 처리합니다:\n${response.tot.steps
+                .map((s: string, i: number) => `${i + 1}. ${s}`)
+                .join("\n")}`,
+            },
+          },
+          timestamp: new Date().toISOString(),
+        });
+      }
+
+      // 3. Pipeline creation card (from graphPatch)
       if (response.graphPatch) {
         const workflow: Workflow = {
           id: `wf-${Date.now()}`,
@@ -147,13 +301,36 @@ export function ChatPanel({
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
         };
-        onWorkflowUpdate?.(workflow);
+        // Store workflow to be applied after first PLAN card renders
+        setPendingWorkflow(workflow);
 
-        toast({
-          title: "워크플로우 생성 완료",
-          description: "그래프 툴바에서 '실행' 버튼을 클릭하세요.",
+        planningCards.push({
+          id: (Date.now() + 3).toString(),
+          event: "OBS",
+          data: {
+            type: "OBS",
+            node_id: "system",
+            message: "파이프라인 생성 완료",
+            detail: {
+              text: `워크플로우가 생성되었습니다.\n- 노드 수: ${response.graphPatch.addNodes.length}개\n- 연결 수: ${response.graphPatch.addEdges.length}개`,
+            },
+          },
+          timestamp: new Date().toISOString(),
         });
       }
+
+      // 4. Assistant response card
+      planningCards.push({
+        id: (Date.now() + 4).toString(),
+        event: "ASSISTANT",
+        data: {
+          type: "ASSISTANT",
+          text: response.assistant,
+        },
+        timestamp: new Date().toISOString(),
+      });
+
+      setEventQueue((prev) => [...prev, ...planningCards]);
     } catch (error) {
       console.error("[v0] Chat turn error:", error);
       toast({
@@ -181,6 +358,16 @@ export function ChatPanel({
       handleSubmit(e);
     }
   };
+
+  const showShimmer =
+    eventQueue.length > 0 || isProcessingQueue || expectingMoreEvents;
+
+  const hasAssistantSummary = messages.some((msg) => msg.event === "ASSISTANT");
+  const shouldShowValidationReport =
+    validationReport &&
+    !isWaitingHITL &&
+    hasAssistantSummary &&
+    eventQueue.length === 0;
 
   return (
     <div className="flex h-full flex-col">
@@ -213,20 +400,26 @@ export function ChatPanel({
 
       <ScrollArea className="flex-1 p-4" ref={scrollRef}>
         <div className="space-y-3" aria-live="polite" aria-atomic="false">
-          {messages.length === 0 ? (
+          {messages.length === 0 && !showShimmer ? (
             <div className="flex flex-col items-center justify-center py-12 text-center">
-              <MessageSquare className="h-12 w-12 text-muted-foreground mb-4" />
               <p className="text-sm text-muted-foreground">
                 메시지를 입력하여 대화를 시작하세요
               </p>
             </div>
           ) : (
-            messages.map((event) => (
-              <EventCard key={event.id} event={event} artifactId={artifactId} />
-            ))
+            <>
+              {messages.map((event) => (
+                <EventCard
+                  key={event.id}
+                  event={event}
+                  artifactId={artifactId}
+                />
+              ))}
+              {showShimmer && <CardShimmer />}
+            </>
           )}
 
-          {validationReport && !isWaitingHITL && (
+          {shouldShowValidationReport && (
             <ValidationReportCard report={validationReport} className="mt-4" />
           )}
         </div>
