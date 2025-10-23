@@ -136,30 +136,37 @@ export function AppShell({
         {/* Left Panel */}
         <aside
           className={cn(
-            "border-r bg-card transition-all duration-300 overflow-hidden",
+            "border-r bg-card transition-all duration-300 overflow-hidden min-w-0",
             leftPanelOpen ? "w-80" : "w-0 border-0",
             "max-lg:absolute max-lg:inset-y-14 max-lg:left-0 max-lg:z-50 max-lg:shadow-lg",
             !leftPanelOpen && "max-lg:-translate-x-full"
           )}
         >
-          <div className="h-full">{leftPanel}</div>
+          {/* 패널 내부의 모든 자식이 폭을 밀지 못하도록 강제 */}
+          <div className="h-full min-w-0 max-w-full overflow-x-hidden [&_*]:min-w-0 [&_*]:max-w-full">
+            {leftPanel}
+          </div>
         </aside>
 
-        {/* Center Panel (Graph Canvas) */}
-        <main className="flex-1 overflow-hidden" role="main">
-          {centerPanel}
+        {/* Center Panel */}
+        <main className="flex-1 min-w-0 overflow-hidden" role="main">
+          <div className="h-full min-w-0 max-w-full overflow-x-hidden">
+            {centerPanel}
+          </div>
         </main>
 
         {/* Right Panel */}
         <aside
           className={cn(
-            "border-l bg-card transition-all duration-300 overflow-hidden",
+            "border-l bg-card transition-all duration-300 overflow-hidden min-w-0",
             rightPanelOpen ? "w-[420px]" : "w-0 border-0",
             "max-xl:absolute max-xl:inset-y-14 max-xl:right-0 max-xl:z-50 max-xl:shadow-lg",
             !rightPanelOpen && "max-xl:translate-x-full"
           )}
         >
-          <div className="h-full">{rightPanel}</div>
+          <div className="h-full min-w-0 max-w-full overflow-x-hidden">
+            {rightPanel}
+          </div>
         </aside>
       </div>
 
